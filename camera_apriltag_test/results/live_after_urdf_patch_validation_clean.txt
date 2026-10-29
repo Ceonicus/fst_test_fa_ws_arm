@@ -1,0 +1,42 @@
+
+Per-sample base_link -> tag36h11_0 position error from mean:
+
+sample 00: x=+0.4510, y=-0.6824, z=+0.3284, error=5.9 mm
+sample 01: x=+0.4514, y=-0.6834, z=+0.3277, error=5.9 mm
+sample 02: x=+0.4513, y=-0.6833, z=+0.3279, error=5.8 mm
+sample 03: x=+0.4494, y=-0.6976, z=+0.3396, error=15.5 mm
+sample 04: x=+0.4496, y=-0.7044, z=+0.3393, error=21.4 mm
+sample 05: x=+0.4520, y=-0.6855, z=+0.3282, error=5.2 mm
+sample 06: x=+0.4522, y=-0.6840, z=+0.3283, error=4.9 mm
+sample 07: x=+0.4521, y=-0.6838, z=+0.3288, error=4.6 mm
+sample 08: x=+0.4526, y=-0.6858, z=+0.3567, error=24.0 mm
+sample 09: x=+0.4437, y=-0.6963, z=+0.3504, error=23.6 mm
+sample 10: x=+0.4502, y=-0.7292, z=+0.3381, error=45.1 mm
+sample 11: x=+0.4566, y=-0.6897, z=+0.3118, error=21.8 mm
+sample 12: x=+0.4577, y=-0.6793, z=+0.3170, error=17.0 mm
+sample 00: x=+0.4519, y=-0.6811, z=+0.3285, error=6.0 mm
+sample 01: x=+0.4517, y=-0.6827, z=+0.3360, error=4.5 mm
+sample 02: x=+0.4514, y=-0.6826, z=+0.3348, error=3.9 mm
+sample 03: x=+0.4542, y=-0.6889, z=+0.3179, error=15.5 mm
+sample 04: x=+0.4525, y=-0.6606, z=+0.3655, error=40.5 mm
+sample 05: x=+0.4679, y=-0.6514, z=+0.3687, error=50.7 mm
+sample 06: x=+0.4679, y=-0.6514, z=+0.3687, error=50.7 mm
+sample 07: x=+0.4744, y=-0.6801, z=+0.3050, error=34.7 mm
+sample 08: x=+0.4575, y=-0.6931, z=+0.2907, error=43.1 mm
+sample 09: x=+0.4466, y=-0.6888, z=+0.3211, error=14.6 mm
+sample 10: x=+0.4550, y=-0.6834, z=+0.3279, error=5.1 mm
+
+Summary:
+sample count: 24
+mean position: x=+0.4542 m, y=-0.6845 m, z=+0.3328 m
+
+Axis standard deviation:
+x std: 6.9 mm
+y std: 15.7 mm
+z std: 19.1 mm
+
+3D error from mean:
+mean error: 19.6 mm
+max error:  50.7 mm
+
+Verdict: USABLE / CHECK

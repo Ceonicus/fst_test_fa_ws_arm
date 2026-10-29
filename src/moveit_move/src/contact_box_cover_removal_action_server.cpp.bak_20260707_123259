@@ -1,0 +1,2026 @@
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iterator>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <regex>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <geometry_msgs/msg/pose.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/quaternion.hpp>
+#include <moveit/move_group_interface/move_group_interface.h>
+#include <moveit/robot_model/joint_model_group.h>
+#include <moveit/robot_state/robot_state.h>
+#include <moveit/robot_trajectory/robot_trajectory.h>
+#include <moveit/trajectory_processing/iterative_time_parameterization.h>
+#include <moveit_msgs/msg/robot_trajectory.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <tf2/exceptions.h>
+#include <tf2/time.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+
+#include <fairino_msgs/srv/fairino_suction_command.hpp>
+#include <moveit_move/action/contact_box_cover_removal.hpp>
+
+using namespace std::chrono_literals;
+
+namespace
+{
+constexpr const char * kBaseFrame = "base_link";
+constexpr const char * kTargetLink = "wrist3_link";
+constexpr double kToolOffsetZ = 0.263;
+constexpr double kFinalTargetMarginM = 0.001;
+constexpr double kMinCurrentStandoffM = 0.015;
+constexpr double kMaxCurrentStandoffM = 0.400;
+constexpr double kAlreadyAtJointTargetToleranceRad = 0.002;
+constexpr double kMinHorizontalPullDirectionNorm = 1e-6;
+constexpr double kJointPlanningTimeSec = 5.0;
+constexpr double kSuctionStatusTimeoutSec = 25.0;
+constexpr double kSuctionStatusPollIntervalSec = 0.25;
+
+struct Vector3
+{
+  double x{0.0};
+  double y{0.0};
+  double z{0.0};
+};
+
+struct StandoffCheck
+{
+  Vector3 wrist;
+  Vector3 suction_tip;
+  double signed_standoff_m{0.0};
+  double lateral_error_m{0.0};
+};
+
+struct MotionConfig
+{
+  double reset_velocity_scaling{0.003};
+  double reset_acceleration_scaling{0.003};
+  double approach_velocity_scaling{0.001};
+  double approach_acceleration_scaling{0.001};
+  double press_velocity_scaling{0.001};
+  double press_acceleration_scaling{0.001};
+  double cartesian_eef_step{0.0005};
+  double cartesian_jump_threshold{0.0};
+  double cartesian_min_fraction{0.99};
+  double max_wrist_target_distance{0.015};
+  double press_max_wrist_target_distance{0.010};
+  double reset_max_joint_delta_rad{1.20};
+  double approach_max_joint_delta_rad{1.20};
+  double press_max_joint_delta_rad{0.03};
+  double default_standoff_m{0.002};
+  double default_press_depth_m{0.002};
+  double max_press_depth_m{0.005};
+  double target_offset_x_m{0.000};
+  double target_offset_y_m{0.000};
+  double target_offset_z_m{-0.030};
+  double max_pre_approach_lateral_error_m{0.050};
+  double cover_lift_z_m{0.013};
+  double min_actual_lift_delta_z_m{0.003};
+  std::string cover_pull_out_axis{"opposite_tool_axis"};
+  double cover_pull_out_m{0.0};
+  double suction_settle_delay_sec{2.0};
+  double cover_mount_offset_x_m{0.010};
+  double cover_mount_offset_y_m{0.000};
+  double cover_mount_offset_z_m{0.000};
+  int pose_sample_count{5};
+  double pose_sample_timeout_sec{5.0};
+  double pose_max_spread_m{0.015};
+  double max_live_vs_manual_delta_m{0.020};
+};
+
+struct RecordedPose
+{
+  std::map<std::string, double> joints;
+  Vector3 position;
+  geometry_msgs::msg::Quaternion orientation;
+};
+
+std::string trim(const std::string & input)
+{
+  const auto first = input.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) {
+    return "";
+  }
+  const auto last = input.find_last_not_of(" \t\r\n");
+  return input.substr(first, last - first + 1);
+}
+
+double vector_norm(const Vector3 & vector)
+{
+  return std::sqrt(vector.x * vector.x + vector.y * vector.y + vector.z * vector.z);
+}
+
+Vector3 add(const Vector3 & a, const Vector3 & b)
+{
+  return Vector3{a.x + b.x, a.y + b.y, a.z + b.z};
+}
+
+Vector3 subtract(const Vector3 & a, const Vector3 & b)
+{
+  return Vector3{a.x - b.x, a.y - b.y, a.z - b.z};
+}
+
+Vector3 scale(const Vector3 & vector, const double scalar)
+{
+  return Vector3{vector.x * scalar, vector.y * scalar, vector.z * scalar};
+}
+
+Vector3 cross(const Vector3 & a, const Vector3 & b)
+{
+  return Vector3{
+    a.y * b.z - a.z * b.y,
+    a.z * b.x - a.x * b.z,
+    a.x * b.y - a.y * b.x};
+}
+
+double dot(const Vector3 & a, const Vector3 & b)
+{
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+geometry_msgs::msg::Quaternion normalized_quaternion(geometry_msgs::msg::Quaternion q)
+{
+  const double norm = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+  if (!std::isfinite(norm) || norm < 1e-12) {
+    throw std::runtime_error("invalid quaternion");
+  }
+  q.x /= norm;
+  q.y /= norm;
+  q.z /= norm;
+  q.w /= norm;
+  return q;
+}
+
+Vector3 rotate_vector_by_quaternion(
+  const geometry_msgs::msg::Quaternion & raw_q,
+  const Vector3 & vector)
+{
+  const auto q = normalized_quaternion(raw_q);
+  const Vector3 q_vec{q.x, q.y, q.z};
+  const Vector3 t = scale(cross(q_vec, vector), 2.0);
+  return add(add(vector, scale(t, q.w)), cross(q_vec, t));
+}
+
+geometry_msgs::msg::Pose make_pose(
+  const Vector3 & position,
+  const geometry_msgs::msg::Quaternion & orientation)
+{
+  geometry_msgs::msg::Pose pose;
+  pose.position.x = position.x;
+  pose.position.y = position.y;
+  pose.position.z = position.z;
+  pose.orientation = normalized_quaternion(orientation);
+  return pose;
+}
+
+double elapsed_sec(const std::chrono::steady_clock::time_point & start)
+{
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+
+enum class GoalMode
+{
+  DryRun,
+  PlanOnly,
+  Execute
+};
+
+std::string stage_feedback_label(const std::string & stage, const GoalMode mode)
+{
+  if (mode == GoalMode::PlanOnly) {
+    return stage + " PLAN_ONLY";
+  }
+  if (mode == GoalMode::DryRun) {
+    return stage + " DRY_RUN";
+  }
+  return stage;
+}
+}  // namespace
+
+class ContactBoxCoverRemovalActionServer : public rclcpp::Node
+{
+public:
+  using Action = moveit_move::action::ContactBoxCoverRemoval;
+  using GoalHandle = rclcpp_action::ServerGoalHandle<Action>;
+
+  ContactBoxCoverRemovalActionServer()
+  : Node(
+      "contact_box_cover_removal_action_server",
+      rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true))
+  {
+    declare_parameter_if_not_declared<std::string>("action_name", "/contact_box_cover_removal");
+    declare_parameter_if_not_declared<std::string>("planning_group", "fairino5_v6_group");
+    declare_parameter_if_not_declared<std::string>("target_link", kTargetLink);
+    declare_parameter_if_not_declared<std::string>("contact_pose_topic", "/contact_box_pose_debug");
+    declare_parameter_if_not_declared<std::string>("workspace_root", ".");
+    declare_parameter_if_not_declared<std::string>("motion_config_file", "config/contact_box_motion.env");
+    declare_parameter_if_not_declared<std::string>(
+      "recorded_poses_file", "config/recorded_robot_poses.json");
+  }
+
+  void initialize()
+  {
+    action_name_ = get_parameter("action_name").as_string();
+    planning_group_ = get_parameter("planning_group").as_string();
+    target_link_ = get_parameter("target_link").as_string();
+    contact_pose_topic_ = get_parameter("contact_pose_topic").as_string();
+    workspace_root_ = std::filesystem::absolute(get_parameter("workspace_root").as_string()).string();
+    motion_config_file_ = resolve_workspace_path(get_parameter("motion_config_file").as_string());
+    recorded_poses_file_ = resolve_workspace_path(get_parameter("recorded_poses_file").as_string());
+
+    config_ = load_motion_config(motion_config_file_);
+    recorded_poses_ = load_recorded_poses(recorded_poses_file_);
+
+    move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
+      shared_from_this(), planning_group_);
+    if (!move_group_->setEndEffectorLink(target_link_)) {
+      throw std::runtime_error("failed to set target_link '" + target_link_ + "'");
+    }
+    move_group_->setPlanningTime(kJointPlanningTimeSec);
+    move_group_->setNumPlanningAttempts(1);
+    move_group_->startStateMonitor(5.0);
+
+    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(
+      *tf_buffer_, shared_from_this(), true);
+
+    joint_state_sub_ = create_subscription<sensor_msgs::msg::JointState>(
+      "/joint_states", 10,
+      std::bind(&ContactBoxCoverRemovalActionServer::joint_state_callback, this, std::placeholders::_1));
+    contact_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
+      contact_pose_topic_, 10,
+      std::bind(&ContactBoxCoverRemovalActionServer::contact_pose_callback, this, std::placeholders::_1));
+
+    initialize_suction_pub_ = create_publisher<std_msgs::msg::Bool>("/initialize_suction", 10);
+    suction_client_ = create_client<fairino_msgs::srv::FairinoSuctionCommand>(
+      "/fairino_suction_command");
+
+    action_server_ = rclcpp_action::create_server<Action>(
+      shared_from_this(),
+      action_name_,
+      std::bind(
+        &ContactBoxCoverRemovalActionServer::handle_goal,
+        this,
+        std::placeholders::_1,
+        std::placeholders::_2),
+      std::bind(
+        &ContactBoxCoverRemovalActionServer::handle_cancel,
+        this,
+        std::placeholders::_1),
+      std::bind(
+        &ContactBoxCoverRemovalActionServer::handle_accepted,
+        this,
+        std::placeholders::_1));
+
+    RCLCPP_WARN(
+      get_logger(),
+      "Contact-box cover-removal action prototype is ready on %s. "
+      "MoveGroupInterface is persistent for planning_group=%s target_link=%s. "
+      "Real motion/suction require goal execute=true and dry_run=false.",
+      action_name_.c_str(),
+      planning_group_.c_str(),
+      target_link_.c_str());
+    RCLCPP_INFO(
+      get_logger(),
+      "Loaded motion config from %s and recorded mount poses from %s.",
+      motion_config_file_.c_str(),
+      recorded_poses_file_.c_str());
+  }
+
+private:
+  template <typename ParameterT>
+  void declare_parameter_if_not_declared(const std::string & name, const ParameterT & default_value)
+  {
+    if (!has_parameter(name)) {
+      declare_parameter<ParameterT>(name, default_value);
+    }
+  }
+
+  rclcpp_action::GoalResponse handle_goal(
+    const rclcpp_action::GoalUUID &,
+    std::shared_ptr<const Action::Goal> goal)
+  {
+    if (goal_active_.exchange(true)) {
+      RCLCPP_ERROR(get_logger(), "Rejecting contact-box cover-removal goal: another goal is active.");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+    RCLCPP_WARN(
+      get_logger(),
+      "Accepted contact-box cover-removal goal: execute=%s, press=%s, dry_run=%s.",
+      goal->execute ? "true" : "false",
+      goal->press ? "true" : "false",
+      goal->dry_run ? "true" : "false");
+    return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+  }
+
+  rclcpp_action::CancelResponse handle_cancel(const std::shared_ptr<GoalHandle> &)
+  {
+    RCLCPP_WARN(get_logger(), "Cancel requested for contact-box cover-removal goal.");
+    return rclcpp_action::CancelResponse::ACCEPT;
+  }
+
+  void handle_accepted(const std::shared_ptr<GoalHandle> goal_handle)
+  {
+    std::thread{std::bind(&ContactBoxCoverRemovalActionServer::execute_goal, this, goal_handle)}.detach();
+  }
+
+  void execute_goal(const std::shared_ptr<GoalHandle> goal_handle)
+  {
+    auto result = std::make_shared<Action::Result>();
+    const auto total_start = std::chrono::steady_clock::now();
+    const auto goal = goal_handle->get_goal();
+    const GoalMode mode = goal->dry_run ? GoalMode::DryRun :
+      (goal->execute ? GoalMode::Execute : GoalMode::PlanOnly);
+    const bool execute_motion = mode == GoalMode::Execute;
+
+    auto finish_failure = [&](const std::string & stage, const std::string & message) {
+        result->success = false;
+        result->message = message;
+        result->failed_stage = stage;
+        result->total_elapsed_sec = elapsed_sec(total_start);
+        RCLCPP_ERROR(
+          get_logger(),
+          "Contact-box cover-removal failed at %s after %.3f s: %s",
+          stage.c_str(), result->total_elapsed_sec, message.c_str());
+        goal_handle->abort(result);
+        goal_active_ = false;
+      };
+
+    auto finish_success = [&](const std::string & message) {
+        result->success = true;
+        result->message = message;
+        result->failed_stage = "";
+        result->total_elapsed_sec = elapsed_sec(total_start);
+        RCLCPP_WARN(
+          get_logger(),
+          "Contact-box cover-removal succeeded in %.3f s: %s",
+          result->total_elapsed_sec, message.c_str());
+        goal_handle->succeed(result);
+        goal_active_ = false;
+      };
+
+    try {
+      if (mode == GoalMode::DryRun) {
+        run_no_motion_dry_run(goal_handle, total_start, goal->press);
+        finish_success("dry-run plumbing check complete; no robot motion or suction command was sent");
+        return;
+      }
+
+      if (!run_stage(
+          goal_handle, total_start, "SUCTION_INIT", mode,
+          [&]() {return execute_motion ? suction_init() : suction_plan_only("SUCTION_INIT");}))
+      {
+        finish_failure("SUCTION_INIT", "suction initialization failed");
+        return;
+      }
+      if (!run_stage(
+          goal_handle, total_start, "MOVE_TO_STAGING_POSE", mode,
+          [&]() {return move_saved_joint_pose(staging_pose_joints(), config_.reset_max_joint_delta_rad,
+              config_.reset_velocity_scaling, config_.reset_acceleration_scaling, execute_motion);}))
+      {
+        finish_failure("MOVE_TO_STAGING_POSE", "failed to move to development staging pose");
+        return;
+      }
+      if (!run_stage(
+          goal_handle, total_start, "MOVE_TO_TRUE_30CM_READY_POSE", mode,
+          [&]() {return move_saved_joint_pose(true_30cm_joints(), config_.reset_max_joint_delta_rad,
+              config_.reset_velocity_scaling, config_.reset_acceleration_scaling, execute_motion);}))
+      {
+        finish_failure("MOVE_TO_TRUE_30CM_READY_POSE", "failed to move to true 30 cm ready pose");
+        return;
+      }
+      if (!run_stage(
+          goal_handle, total_start, "ACQUIRE_FRESH_CONTACT_POSE", mode,
+          [&]() {return acquire_and_validate_contact_pose();}))
+      {
+        finish_failure("ACQUIRE_FRESH_CONTACT_POSE", "fresh contact pose acquisition or validation failed");
+        return;
+      }
+      if (!run_stage(
+          goal_handle, total_start, "FINAL_CONTACT_APPROACH", mode,
+          [&]() {return move_to_adjusted_contact_standoff(config_.default_standoff_m,
+              config_.approach_max_joint_delta_rad, config_.max_wrist_target_distance,
+              config_.approach_velocity_scaling, config_.approach_acceleration_scaling, execute_motion);}))
+      {
+        finish_failure("FINAL_CONTACT_APPROACH", "final contact approach failed");
+        return;
+      }
+      if (goal->press) {
+        if (!run_stage(
+            goal_handle, total_start, "CONTROLLED_PRESS_IN", mode,
+            [&]() {return controlled_press_in(execute_motion);}))
+        {
+          finish_failure("CONTROLLED_PRESS_IN", "controlled press-in failed");
+          return;
+        }
+      }
+      if (!run_stage(
+          goal_handle, total_start, "SUCTION_ON", mode,
+          [&]() {return execute_motion ? suction_on() : suction_plan_only("SUCTION_ON");}))
+      {
+        finish_failure("SUCTION_ON", "suction ON failed");
+        return;
+      }
+      if (!run_stage(
+          goal_handle, total_start, "SUCTION_SETTLE_DELAY", mode,
+          [&]() {return suction_settle_delay(execute_motion);}))
+      {
+        finish_failure("SUCTION_SETTLE_DELAY", "suction settle delay failed");
+        return;
+      }
+      if (!run_stage(
+          goal_handle, total_start, "LIFT_COVER", mode,
+          [&]() {return lift_cover(execute_motion);}))
+      {
+        finish_failure("LIFT_COVER", "cover lift failed");
+        return;
+      }
+      if (!run_stage(
+          goal_handle, total_start, "PULL_COVER_OUT", mode,
+          [&]() {return pull_cover_out(execute_motion);}))
+      {
+        finish_failure("PULL_COVER_OUT", "cover pull-out failed");
+        return;
+      }
+      if (!run_stage(
+          goal_handle, total_start, "MOVE_TO_MOUNT", mode,
+          [&]() {return move_to_mount(execute_motion);}))
+      {
+        finish_failure("MOVE_TO_MOUNT", "move to mount failed");
+        return;
+      }
+      if (!run_stage(
+          goal_handle, total_start, "SUCTION_OFF", mode,
+          [&]() {return execute_motion ? suction_off() : suction_plan_only("SUCTION_OFF");}))
+      {
+        finish_failure("SUCTION_OFF", "suction OFF failed");
+        return;
+      }
+      if (!run_stage(
+          goal_handle, total_start, "MOUNT_RETREAT", mode,
+          [&]() {return mount_retreat(execute_motion);}))
+      {
+        finish_failure("MOUNT_RETREAT", "mount retreat failed");
+        return;
+      }
+
+      finish_success(
+        execute_motion ? "cover-removal sequence complete" :
+        "plan-only validation complete; no robot motion or suction command was sent");
+    } catch (const std::exception & exc) {
+      finish_failure("EXCEPTION", exc.what());
+    }
+  }
+
+  bool run_stage(
+    const std::shared_ptr<GoalHandle> & goal_handle,
+    const std::chrono::steady_clock::time_point & total_start,
+    const std::string & stage,
+    const GoalMode mode,
+    const std::function<bool()> & fn)
+  {
+    if (goal_handle->is_canceling()) {
+      return false;
+    }
+    const auto stage_start = std::chrono::steady_clock::now();
+    const std::string feedback_stage = stage_feedback_label(stage, mode);
+    publish_feedback(goal_handle, feedback_stage, 0.0, elapsed_sec(total_start));
+    RCLCPP_WARN(get_logger(), "STAGE START: %s", feedback_stage.c_str());
+    const bool ok = fn();
+    const double stage_elapsed = elapsed_sec(stage_start);
+    publish_feedback(
+      goal_handle,
+      feedback_stage + (ok ? " SUCCESS" : " FAILURE"),
+      stage_elapsed,
+      elapsed_sec(total_start));
+    RCLCPP_WARN(
+      get_logger(),
+      "STAGE %s: %s duration=%.3f s",
+      ok ? "SUCCESS" : "FAILURE",
+      feedback_stage.c_str(),
+      stage_elapsed);
+    return ok && !goal_handle->is_canceling();
+  }
+
+  void publish_feedback(
+    const std::shared_ptr<GoalHandle> & goal_handle,
+    const std::string & stage,
+    const double stage_elapsed_sec,
+    const double total_elapsed_sec)
+  {
+    auto feedback = std::make_shared<Action::Feedback>();
+    feedback->current_stage = stage;
+    feedback->stage_elapsed_sec = stage_elapsed_sec;
+    feedback->total_elapsed_sec = total_elapsed_sec;
+    goal_handle->publish_feedback(feedback);
+  }
+
+  void run_no_motion_dry_run(
+    const std::shared_ptr<GoalHandle> & goal_handle,
+    const std::chrono::steady_clock::time_point & total_start,
+    const bool press)
+  {
+    std::vector<std::string> stages{
+      "SUCTION_INIT",
+      "MOVE_TO_STAGING_POSE",
+      "MOVE_TO_TRUE_30CM_READY_POSE",
+      "ACQUIRE_FRESH_CONTACT_POSE",
+      "FINAL_CONTACT_APPROACH"};
+    if (press) {
+      stages.push_back("CONTROLLED_PRESS_IN");
+    }
+    stages.insert(
+      stages.end(),
+      {"SUCTION_ON", "SUCTION_SETTLE_DELAY", "LIFT_COVER", "PULL_COVER_OUT",
+        "MOVE_TO_MOUNT", "SUCTION_OFF", "MOUNT_RETREAT"});
+
+    for (const auto & stage : stages) {
+      publish_feedback(goal_handle, stage + " DRY_RUN", 0.0, elapsed_sec(total_start));
+      RCLCPP_INFO(get_logger(), "DRY RUN STAGE: %s", stage.c_str());
+    }
+  }
+
+  bool suction_init()
+  {
+    const std::size_t subscriber_count = count_subscribers("/initialize_suction");
+    if (subscriber_count == 0) {
+      RCLCPP_WARN(
+        get_logger(),
+        "/initialize_suction has no visible subscriber. The robot stack may not be ready.");
+    }
+    std_msgs::msg::Bool msg;
+    msg.data = true;
+    initialize_suction_pub_->publish(msg);
+
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration<double>(kSuctionStatusTimeoutSec);
+    int attempts = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+      attempts += 1;
+      std::string response_message;
+      if (call_suction_command(
+          fairino_msgs::srv::FairinoSuctionCommand::Request::STATUS,
+          5.0,
+          response_message))
+      {
+        RCLCPP_INFO(
+          get_logger(),
+          "Suction STATUS confirmed after %d attempts: %s",
+          attempts,
+          response_message.c_str());
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::duration<double>(kSuctionStatusPollIntervalSec));
+    }
+
+    RCLCPP_ERROR(
+      get_logger(),
+      "Suction setup was requested but STATUS did not confirm within %.1f s.",
+      kSuctionStatusTimeoutSec);
+    return false;
+  }
+
+  bool suction_on()
+  {
+    std::string response_message;
+    return call_suction_command(
+      fairino_msgs::srv::FairinoSuctionCommand::Request::A_ON,
+      5.0,
+      response_message);
+  }
+
+  bool suction_off()
+  {
+    std::string response_message;
+    return call_suction_command(
+      fairino_msgs::srv::FairinoSuctionCommand::Request::ALL_OFF,
+      5.0,
+      response_message);
+  }
+
+  bool suction_plan_only(const std::string & stage)
+  {
+    RCLCPP_WARN(
+      get_logger(),
+      "PLAN_ONLY: %s will not publish /initialize_suction and will not call /fairino_suction_command.",
+      stage.c_str());
+    if (stage == "SUCTION_INIT" && count_subscribers("/initialize_suction") == 0) {
+      RCLCPP_WARN(
+        get_logger(),
+        "PLAN_ONLY: /initialize_suction has no visible subscriber. "
+        "Continuing because no setup message will be published in plan-only mode.");
+    }
+    if (!suction_client_->service_is_ready() && !suction_client_->wait_for_service(500ms)) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "PLAN_ONLY: /fairino_suction_command is not available for %s validation.",
+        stage.c_str());
+      return false;
+    }
+    return true;
+  }
+
+  bool suction_settle_delay(const bool execute_motion)
+  {
+    if (!execute_motion) {
+      RCLCPP_WARN(
+        get_logger(),
+        "PLAN_ONLY: would wait %.3f s after SUCTION_ON before LIFT_COVER; skipping sleep.",
+        config_.suction_settle_delay_sec);
+      return true;
+    }
+    RCLCPP_WARN(
+      get_logger(),
+      "Waiting %.3f s after SUCTION_ON before LIFT_COVER. No motion or suction command is sent during this delay.",
+      config_.suction_settle_delay_sec);
+    std::this_thread::sleep_for(std::chrono::duration<double>(config_.suction_settle_delay_sec));
+    return true;
+  }
+
+  bool call_suction_command(
+    const int8_t command,
+    const double timeout_sec,
+    std::string & response_message)
+  {
+    if (!suction_client_->wait_for_service(std::chrono::duration<double>(timeout_sec))) {
+      RCLCPP_ERROR(get_logger(), "/fairino_suction_command is not available.");
+      return false;
+    }
+
+    auto request = std::make_shared<fairino_msgs::srv::FairinoSuctionCommand::Request>();
+    request->command = command;
+    auto future = suction_client_->async_send_request(request);
+    if (future.wait_for(std::chrono::duration<double>(timeout_sec)) != std::future_status::ready) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Timed out waiting for /fairino_suction_command response for command %d.",
+        static_cast<int>(command));
+      return false;
+    }
+
+    const auto response = future.get();
+    response_message = response->message;
+    if (!response->success) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "/fairino_suction_command command %d returned success=false: %s",
+        static_cast<int>(command),
+        response->message.c_str());
+      return false;
+    }
+
+    RCLCPP_INFO(
+      get_logger(),
+      "/fairino_suction_command command %d returned success=true: %s",
+      static_cast<int>(command),
+      response->message.c_str());
+    return true;
+  }
+
+  bool move_saved_joint_pose(
+    const std::map<std::string, double> & target_joints,
+    const double max_joint_delta_rad,
+    const double velocity_scaling,
+    const double acceleration_scaling,
+    const bool execute_motion)
+  {
+    if (!wait_for_joint_state(5.0)) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: no /joint_states available for saved pose.");
+      return false;
+    }
+
+    const auto robot_model = move_group_->getRobotModel();
+    if (!robot_model) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: MoveIt robot model is unavailable.");
+      return false;
+    }
+    const auto * joint_model_group = robot_model->getJointModelGroup(planning_group_);
+    if (joint_model_group == nullptr) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: planning group '%s' not found.", planning_group_.c_str());
+      return false;
+    }
+
+    const auto moveit_joint_names = joint_model_group->getVariableNames();
+    if (!target_covers_moveit_group(target_joints, moveit_joint_names)) {
+      return false;
+    }
+
+    std::map<std::string, double> current_joints;
+    if (!current_joint_values_from_latest_joint_state(moveit_joint_names, current_joints)) {
+      return false;
+    }
+    if (!current_to_target_guard_passed(
+        current_joints, target_joints, moveit_joint_names, max_joint_delta_rad))
+    {
+      return false;
+    }
+
+    double max_delta = 0.0;
+    for (const auto & joint_name : moveit_joint_names) {
+      max_delta = std::max(max_delta, std::fabs(target_joints.at(joint_name) - current_joints.at(joint_name)));
+    }
+    if (max_delta <= kAlreadyAtJointTargetToleranceRad) {
+      RCLCPP_INFO(
+        get_logger(),
+        "Saved joint target already reached within %.6f rad tolerance.",
+        kAlreadyAtJointTargetToleranceRad);
+      return true;
+    }
+
+    move_group_->clearPoseTargets();
+    set_start_state_from_joint_values(current_joints);
+    move_group_->setMaxVelocityScalingFactor(velocity_scaling);
+    move_group_->setMaxAccelerationScalingFactor(acceleration_scaling);
+    move_group_->setPlanningTime(kJointPlanningTimeSec);
+    move_group_->setNumPlanningAttempts(1);
+    if (!move_group_->setJointValueTarget(target_joints)) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: MoveIt rejected saved joint target.");
+      return false;
+    }
+
+    moveit::planning_interface::MoveGroupInterface::Plan plan;
+    if (!static_cast<bool>(move_group_->plan(plan))) {
+      RCLCPP_ERROR(get_logger(), "Saved joint pose planning failed.");
+      return false;
+    }
+    if (!joint_delta_guard_passed(plan, max_joint_delta_rad)) {
+      return false;
+    }
+    return execute_or_skip_plan(plan, "saved joint pose", execute_motion);
+  }
+
+  bool move_to_adjusted_contact_standoff(
+    const double standoff_m,
+    const double max_joint_delta_rad,
+    const double max_wrist_target_distance,
+    const double velocity_scaling,
+    const double acceleration_scaling,
+    const bool execute_motion)
+  {
+    geometry_msgs::msg::Quaternion q;
+    q.x = 0.500;
+    q.y = 0.490;
+    q.z = 0.011;
+    q.w = 0.714;
+    q = normalized_quaternion(q);
+
+    const Vector3 rotated_tool_offset = rotate_vector_by_quaternion(q, Vector3{0.0, 0.0, kToolOffsetZ});
+    const double tool_offset_norm = vector_norm(rotated_tool_offset);
+    if (tool_offset_norm < 1e-9) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: tool offset norm is invalid.");
+      return false;
+    }
+    const Vector3 standoff_vector = scale(rotated_tool_offset, standoff_m / tool_offset_norm);
+    const Vector3 wrist_target = subtract(subtract(adjusted_contact_pose_, rotated_tool_offset), standoff_vector);
+    return move_cartesian_wrist_target(
+      "contact standoff",
+      make_pose(wrist_target, q),
+      max_wrist_target_distance,
+      max_joint_delta_rad,
+      velocity_scaling,
+      acceleration_scaling,
+      execute_motion);
+  }
+
+  bool controlled_press_in(const bool execute_motion)
+  {
+    const double raw_target = config_.default_standoff_m - config_.default_press_depth_m;
+    const double target_standoff = std::max(0.0, raw_target);
+    if (config_.default_press_depth_m < 0.0 || config_.default_press_depth_m > config_.max_press_depth_m) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "SAFETY BLOCKED: press depth %.6f exceeds max %.6f.",
+        config_.default_press_depth_m,
+        config_.max_press_depth_m);
+      return false;
+    }
+    log_standoff_check("press pre-check", adjusted_contact_pose_);
+    return move_to_adjusted_contact_standoff(
+      target_standoff,
+      config_.press_max_joint_delta_rad,
+      config_.press_max_wrist_target_distance,
+      config_.press_velocity_scaling,
+      config_.press_acceleration_scaling,
+      execute_motion);
+  }
+
+  bool lift_cover(const bool execute_motion)
+  {
+    if (!get_current_wrist_pose(current_pickout_pose_)) {
+      return false;
+    }
+    const Vector3 current{
+      current_pickout_pose_.position.x,
+      current_pickout_pose_.position.y,
+      current_pickout_pose_.position.z};
+    const auto q = normalized_quaternion(current_pickout_pose_.orientation);
+    const Vector3 tool_axis = rotate_vector_by_quaternion(q, Vector3{0.0, 0.0, 1.0});
+    const Vector3 pull_direction = scale(tool_axis, -1.0);
+    lift_target_pose_ = current_pickout_pose_;
+    lift_target_pose_.position.z = current.z + config_.cover_lift_z_m;
+    const Vector3 lift_target{
+      lift_target_pose_.position.x,
+      lift_target_pose_.position.y,
+      lift_target_pose_.position.z};
+    const Vector3 lift_delta = subtract(lift_target, current);
+    const double lift_max_wrist_target_distance = config_.cover_lift_z_m + 0.010;
+    RCLCPP_WARN(
+      get_logger(),
+      "ACTION PICKOUT LOGIC MATCHES BASH: LIFT_COVER copies "
+      "run_contact_box_cover_pickout_sequence.sh: lift_target=(current.x, current.y, current.z + lift_z), "
+      "fixed wrist orientation from initial pickout pose.");
+    RCLCPP_WARN(
+      get_logger(),
+      "LIFT_COVER bash-matched inputs: current=(%.6f, %.6f, %.6f), qxyzw=(%.6f, %.6f, %.6f, %.6f), "
+      "tool_z=(%.6f, %.6f, %.6f), pull_direction=(-tool_z)=(%.6f, %.6f, %.6f), "
+      "lift_target=(%.6f, %.6f, %.6f), delta=(%.6f, %.6f, %.6f), "
+      "lift_z=%.6f, max_wrist_target_distance=%.6f.",
+      current.x, current.y, current.z,
+      q.x, q.y, q.z, q.w,
+      tool_axis.x, tool_axis.y, tool_axis.z,
+      pull_direction.x, pull_direction.y, pull_direction.z,
+      lift_target.x, lift_target.y, lift_target.z,
+      lift_delta.x, lift_delta.y, lift_delta.z,
+      config_.cover_lift_z_m,
+      lift_max_wrist_target_distance);
+    const bool moved = move_cartesian_wrist_target(
+      "Lift cover in base_link +Z",
+      lift_target_pose_,
+      lift_max_wrist_target_distance,
+      config_.approach_max_joint_delta_rad,
+      config_.approach_velocity_scaling,
+      config_.approach_acceleration_scaling,
+      execute_motion);
+    if (!moved) {
+      return false;
+    }
+    if (execute_motion && !verify_minimum_lift_delta(lift_target)) {
+      return false;
+    }
+    return true;
+  }
+
+  bool pull_cover_out(const bool execute_motion)
+  {
+    if (config_.cover_pull_out_axis != "opposite_tool_axis" || config_.cover_pull_out_m <= 0.0) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: cover pull-out config is invalid.");
+      return false;
+    }
+    const auto q = normalized_quaternion(current_pickout_pose_.orientation);
+    const Vector3 tool_axis = rotate_vector_by_quaternion(q, Vector3{0.0, 0.0, 1.0});
+    const Vector3 raw_pull_direction = scale(tool_axis, -1.0);
+    const double horizontal_norm = std::sqrt(
+      raw_pull_direction.x * raw_pull_direction.x +
+      raw_pull_direction.y * raw_pull_direction.y);
+    if (!std::isfinite(horizontal_norm) || horizontal_norm < kMinHorizontalPullDirectionNorm) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "SAFETY BLOCKED: projected horizontal pull direction norm %.9f is too small.",
+        horizontal_norm);
+      return false;
+    }
+    const Vector3 horizontal_pull_direction{
+      raw_pull_direction.x / horizontal_norm,
+      raw_pull_direction.y / horizontal_norm,
+      0.0};
+    const Vector3 lift{
+      lift_target_pose_.position.x,
+      lift_target_pose_.position.y,
+      lift_target_pose_.position.z};
+    const Vector3 pull{
+      lift.x + horizontal_pull_direction.x * config_.cover_pull_out_m,
+      lift.y + horizontal_pull_direction.y * config_.cover_pull_out_m,
+      lift.z};
+    geometry_msgs::msg::Pose pull_pose = lift_target_pose_;
+    pull_pose.position.x = pull.x;
+    pull_pose.position.y = pull.y;
+    pull_pose.position.z = pull.z;
+    if (pull_pose.position.z < lift_target_pose_.position.z) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "SAFETY BLOCKED: pull target z %.9f is below lifted z %.9f.",
+        pull_pose.position.z,
+        lift_target_pose_.position.z);
+      return false;
+    }
+    const Vector3 original{
+      current_pickout_pose_.position.x,
+      current_pickout_pose_.position.y,
+      current_pickout_pose_.position.z};
+    const double pull_total = vector_norm(subtract(pull, original));
+    geometry_msgs::msg::Pose live_current_pose;
+    if (!get_current_wrist_pose(live_current_pose)) {
+      return false;
+    }
+    const Vector3 live_current{
+      live_current_pose.position.x,
+      live_current_pose.position.y,
+      live_current_pose.position.z};
+    const Vector3 pull_delta_from_lift = subtract(pull, lift);
+    const Vector3 pull_delta_from_live = subtract(pull, live_current);
+    if (pull_delta_from_live.z < -1e-6) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "SAFETY BLOCKED: pull target would move downward from live post-lift z by %.9f m.",
+        pull_delta_from_live.z);
+      return false;
+    }
+    const double pull_max_wrist_target_distance = pull_total + 0.010;
+    RCLCPP_WARN(
+      get_logger(),
+      "PULL_COVER_OUT keeps lifted Z constant to prevent hook re-latching.");
+    RCLCPP_WARN(
+      get_logger(),
+      "PULL_COVER_OUT horizontal-projected inputs: initial_pickout=(%.6f, %.6f, %.6f), "
+      "live_current=(%.6f, %.6f, %.6f), lift_target=(%.6f, %.6f, %.6f), "
+      "qxyzw=(%.6f, %.6f, %.6f, %.6f), tool_z=(%.6f, %.6f, %.6f), "
+      "raw_opposite_approach=(-tool_z)=(%.6f, %.6f, %.6f), "
+      "horizontal_pull_direction=(%.6f, %.6f, %.6f), horizontal_norm=%.9f, "
+      "pull_target=(%.6f, %.6f, %.6f), delta_from_lift=(%.6f, %.6f, %.6f), "
+      "delta_from_live=(%.6f, %.6f, %.6f), pull_delta_z_assert=%.6f, "
+      "pull_out=%.6f, max_wrist_target_distance=%.6f.",
+      original.x, original.y, original.z,
+      live_current.x, live_current.y, live_current.z,
+      lift.x, lift.y, lift.z,
+      q.x, q.y, q.z, q.w,
+      tool_axis.x, tool_axis.y, tool_axis.z,
+      raw_pull_direction.x, raw_pull_direction.y, raw_pull_direction.z,
+      horizontal_pull_direction.x, horizontal_pull_direction.y, horizontal_pull_direction.z,
+      horizontal_norm,
+      pull.x, pull.y, pull.z,
+      pull_delta_from_lift.x, pull_delta_from_lift.y, pull_delta_from_lift.z,
+      pull_delta_from_live.x, pull_delta_from_live.y, pull_delta_from_live.z,
+      pull_delta_from_lift.z,
+      config_.cover_pull_out_m,
+      pull_max_wrist_target_distance);
+    return move_cartesian_wrist_target(
+      "cover pull-out",
+      pull_pose,
+      pull_max_wrist_target_distance,
+      config_.approach_max_joint_delta_rad,
+      config_.approach_velocity_scaling,
+      config_.approach_acceleration_scaling,
+      execute_motion);
+  }
+
+  bool verify_minimum_lift_delta(const Vector3 & lift_target)
+  {
+    geometry_msgs::msg::Pose actual_pose;
+    if (!get_current_wrist_pose(actual_pose)) {
+      return false;
+    }
+    const Vector3 initial{
+      current_pickout_pose_.position.x,
+      current_pickout_pose_.position.y,
+      current_pickout_pose_.position.z};
+    const Vector3 actual{
+      actual_pose.position.x,
+      actual_pose.position.y,
+      actual_pose.position.z};
+    const Vector3 actual_delta = subtract(actual, initial);
+    const Vector3 target_error = subtract(actual, lift_target);
+    const double error_norm = vector_norm(target_error);
+    RCLCPP_WARN(
+      get_logger(),
+      "LIFT_COVER post-exec check: actual=(%.6f, %.6f, %.6f), "
+      "actual_lift_delta=(%.6f, %.6f, %.6f), target=(%.6f, %.6f, %.6f), "
+      "target_error=(%.6f, %.6f, %.6f), error_norm=%.6f, commanded_lift_z=%.6f, "
+      "min_actual_lift_delta_z=%.6f.",
+      actual.x, actual.y, actual.z,
+      actual_delta.x, actual_delta.y, actual_delta.z,
+      lift_target.x, lift_target.y, lift_target.z,
+      target_error.x, target_error.y, target_error.z,
+      error_norm,
+      config_.cover_lift_z_m,
+      config_.min_actual_lift_delta_z_m);
+    if (actual_delta.z < config_.min_actual_lift_delta_z_m) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "SAFETY BLOCKED: LIFT_COVER actual Z lift %.6f m is below configured minimum %.6f m. "
+        "Refusing to continue to PULL_COVER_OUT.",
+        actual_delta.z,
+        config_.min_actual_lift_delta_z_m);
+      return false;
+    }
+    if (actual_delta.z < config_.cover_lift_z_m) {
+      RCLCPP_WARN(
+        get_logger(),
+        "LIFT_COVER actual Z lift %.6f m is less than commanded %.6f m; continuing because it meets "
+        "the configured minimum actual lift %.6f m, matching the bash flow's permissive behavior.",
+        actual_delta.z,
+        config_.cover_lift_z_m,
+        config_.min_actual_lift_delta_z_m);
+    }
+    return true;
+  }
+
+  bool move_to_mount(const bool execute_motion)
+  {
+    const auto approach = recorded_poses_.at("cover_mount_approach");
+    const auto place = recorded_poses_.at("cover_mount_place");
+    const Vector3 mount_offset{
+      config_.cover_mount_offset_x_m,
+      config_.cover_mount_offset_y_m,
+      config_.cover_mount_offset_z_m};
+    const Vector3 shifted_approach = add(approach.position, mount_offset);
+    const Vector3 shifted_place = add(place.position, mount_offset);
+
+    if (!move_saved_joint_pose(
+        approach.joints,
+        config_.reset_max_joint_delta_rad,
+        config_.reset_velocity_scaling,
+        config_.reset_acceleration_scaling,
+        execute_motion))
+    {
+      return false;
+    }
+
+    const double offset_distance = vector_norm(mount_offset);
+    if (offset_distance > 0.0005) {
+      if (!move_cartesian_wrist_target(
+          "mount offset nudge",
+          make_pose(shifted_approach, approach.orientation),
+          std::max(offset_distance + 0.010, 0.010),
+          config_.approach_max_joint_delta_rad,
+          config_.approach_velocity_scaling,
+          config_.approach_acceleration_scaling,
+          execute_motion))
+      {
+        return false;
+      }
+    } else {
+      RCLCPP_INFO(get_logger(), "Skipping zero-distance mount-offset nudge.");
+    }
+
+    const double place_distance = vector_norm(subtract(shifted_place, shifted_approach));
+    return move_cartesian_wrist_target(
+      "mount place",
+      make_pose(shifted_place, place.orientation),
+      std::max(place_distance + 0.010, 0.010),
+      config_.approach_max_joint_delta_rad,
+      config_.approach_velocity_scaling,
+      config_.approach_acceleration_scaling,
+      execute_motion);
+  }
+
+  bool mount_retreat(const bool execute_motion)
+  {
+    const auto approach = recorded_poses_.at("cover_mount_approach");
+    const auto place = recorded_poses_.at("cover_mount_place");
+    const Vector3 mount_offset{
+      config_.cover_mount_offset_x_m,
+      config_.cover_mount_offset_y_m,
+      config_.cover_mount_offset_z_m};
+    const Vector3 shifted_approach = add(approach.position, mount_offset);
+    const Vector3 shifted_place = add(place.position, mount_offset);
+    const double retreat_distance = vector_norm(subtract(shifted_approach, shifted_place));
+    return move_cartesian_wrist_target(
+      "mount retreat",
+      make_pose(shifted_approach, approach.orientation),
+      std::max(retreat_distance + 0.010, 0.010),
+      config_.approach_max_joint_delta_rad,
+      config_.approach_velocity_scaling,
+      config_.approach_acceleration_scaling,
+      execute_motion);
+  }
+
+  bool move_cartesian_wrist_target(
+    const std::string & label,
+    const geometry_msgs::msg::Pose & target_pose,
+    const double max_wrist_target_distance,
+    const double max_joint_delta_rad,
+    const double velocity_scaling,
+    const double acceleration_scaling,
+    const bool execute_motion)
+  {
+    if (!wait_for_joint_state(5.0)) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: no /joint_states available for Cartesian move.");
+      return false;
+    }
+
+    geometry_msgs::msg::Pose current_pose;
+    if (!get_current_wrist_pose(current_pose)) {
+      return false;
+    }
+    const Vector3 current{
+      current_pose.position.x,
+      current_pose.position.y,
+      current_pose.position.z};
+    const Vector3 target{
+      target_pose.position.x,
+      target_pose.position.y,
+      target_pose.position.z};
+    const double distance = vector_norm(subtract(target, current));
+    RCLCPP_INFO(
+      get_logger(),
+      "Cartesian %s: current=(%.4f, %.4f, %.4f) target=(%.4f, %.4f, %.4f) "
+      "distance=%.4f limit=%.4f",
+      label.c_str(),
+      current.x, current.y, current.z,
+      target.x, target.y, target.z,
+      distance,
+      max_wrist_target_distance);
+    if (distance > max_wrist_target_distance) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "SAFETY BLOCKED: wrist target distance %.4f exceeds limit %.4f.",
+        distance,
+        max_wrist_target_distance);
+      return false;
+    }
+
+    const auto robot_model = move_group_->getRobotModel();
+    const auto * joint_model_group = robot_model ? robot_model->getJointModelGroup(planning_group_) : nullptr;
+    if (joint_model_group == nullptr) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: planning group unavailable for Cartesian move.");
+      return false;
+    }
+    std::map<std::string, double> current_joints;
+    if (!current_joint_values_from_latest_joint_state(joint_model_group->getVariableNames(), current_joints)) {
+      return false;
+    }
+    set_start_state_from_joint_values(current_joints);
+
+    move_group_->clearPoseTargets();
+    move_group_->setMaxVelocityScalingFactor(velocity_scaling);
+    move_group_->setMaxAccelerationScalingFactor(acceleration_scaling);
+    move_group_->setPoseReferenceFrame(move_group_->getPlanningFrame());
+
+    const auto waypoints = make_cartesian_waypoints(current_pose, target_pose, distance);
+    moveit_msgs::msg::RobotTrajectory trajectory;
+    const double fraction = move_group_->computeCartesianPath(
+      waypoints, config_.cartesian_eef_step, config_.cartesian_jump_threshold, trajectory, true);
+    RCLCPP_INFO(
+      get_logger(),
+      "Cartesian %s fraction=%.4f required=%.4f waypoints=%zu points=%zu.",
+      label.c_str(),
+      fraction,
+      config_.cartesian_min_fraction,
+      waypoints.size(),
+      trajectory.joint_trajectory.points.size());
+    if (fraction < config_.cartesian_min_fraction) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: Cartesian fraction below configured minimum.");
+      return false;
+    }
+    if (!retime_cartesian_trajectory(trajectory, velocity_scaling, acceleration_scaling)) {
+      return false;
+    }
+    moveit::planning_interface::MoveGroupInterface::Plan plan;
+    plan.trajectory_ = trajectory;
+    if (!joint_delta_guard_passed(plan, max_joint_delta_rad)) {
+      return false;
+    }
+    return execute_or_skip_plan(plan, label, execute_motion);
+  }
+
+  bool execute_or_skip_plan(
+    const moveit::planning_interface::MoveGroupInterface::Plan & plan,
+    const std::string & label,
+    const bool execute_motion)
+  {
+    if (!execute_motion) {
+      RCLCPP_WARN(
+        get_logger(),
+        "PLAN_ONLY: planned %s successfully; skipping MoveGroupInterface::execute().",
+        label.c_str());
+      return true;
+    }
+    RCLCPP_WARN(get_logger(), "Executing %s with persistent MoveGroupInterface.", label.c_str());
+    const bool execute_success = static_cast<bool>(move_group_->execute(plan));
+    if (!execute_success) {
+      RCLCPP_ERROR(get_logger(), "%s execution failed or was aborted.", label.c_str());
+      return false;
+    }
+    RCLCPP_INFO(get_logger(), "%s execution completed successfully.", label.c_str());
+    return true;
+  }
+
+  bool acquire_and_validate_contact_pose()
+  {
+    std::vector<geometry_msgs::msg::PoseStamped> samples;
+    {
+      std::lock_guard<std::mutex> lock(contact_pose_mutex_);
+      contact_pose_acquisition_start_ros_time_ = now();
+      contact_pose_samples_.clear();
+      contact_pose_acquiring_ = true;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration<double>(config_.pose_sample_timeout_sec);
+    while (std::chrono::steady_clock::now() < deadline) {
+      {
+        std::lock_guard<std::mutex> lock(contact_pose_mutex_);
+        if (contact_pose_samples_.size() >= static_cast<std::size_t>(config_.pose_sample_count)) {
+          samples = contact_pose_samples_;
+          contact_pose_acquiring_ = false;
+          break;
+        }
+      }
+      std::this_thread::sleep_for(50ms);
+    }
+    {
+      std::lock_guard<std::mutex> lock(contact_pose_mutex_);
+      contact_pose_acquiring_ = false;
+      if (samples.empty() && contact_pose_samples_.size() >= static_cast<std::size_t>(config_.pose_sample_count)) {
+        samples = contact_pose_samples_;
+      }
+    }
+
+    if (samples.size() < static_cast<std::size_t>(config_.pose_sample_count)) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "SAFETY BLOCKED: timed out waiting for %d fresh contact pose samples; got %zu.",
+        config_.pose_sample_count,
+        samples.size());
+      return false;
+    }
+
+    Vector3 average;
+    for (const auto & sample : samples) {
+      average.x += sample.pose.position.x;
+      average.y += sample.pose.position.y;
+      average.z += sample.pose.position.z;
+    }
+    average = scale(average, 1.0 / static_cast<double>(samples.size()));
+    double max_deviation = 0.0;
+    for (const auto & sample : samples) {
+      const Vector3 point{sample.pose.position.x, sample.pose.position.y, sample.pose.position.z};
+      max_deviation = std::max(max_deviation, vector_norm(subtract(point, average)));
+    }
+    if (max_deviation > config_.pose_max_spread_m) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "SAFETY BLOCKED: contact pose spread %.4f exceeds limit %.4f.",
+        max_deviation,
+        config_.pose_max_spread_m);
+      return false;
+    }
+
+    raw_contact_pose_ = average;
+    adjusted_contact_pose_ = Vector3{
+      raw_contact_pose_.x + config_.target_offset_x_m,
+      raw_contact_pose_.y + config_.target_offset_y_m,
+      raw_contact_pose_.z + config_.target_offset_z_m};
+    RCLCPP_WARN(
+      get_logger(),
+      "Fresh contact pose locked: raw=(%.4f, %.4f, %.4f), adjusted=(%.4f, %.4f, %.4f), "
+      "max_deviation=%.4f.",
+      raw_contact_pose_.x, raw_contact_pose_.y, raw_contact_pose_.z,
+      adjusted_contact_pose_.x, adjusted_contact_pose_.y, adjusted_contact_pose_.z,
+      max_deviation);
+
+    const Vector3 manual{0.3323, -0.7376, 0.6131};
+    const double raw_vs_manual = vector_norm(subtract(raw_contact_pose_, manual));
+    if (raw_vs_manual > config_.max_live_vs_manual_delta_m) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Raw live contact point differs from development manual point by %.4f m "
+        "(warning threshold %.4f m).",
+        raw_vs_manual,
+        config_.max_live_vs_manual_delta_m);
+    }
+
+    const auto check = compute_standoff(adjusted_contact_pose_);
+    RCLCPP_INFO(
+      get_logger(),
+      "Pre-approach standoff check: signed=%.4f m, lateral=%.4f m.",
+      check.signed_standoff_m,
+      check.lateral_error_m);
+    if (check.signed_standoff_m < kMinCurrentStandoffM) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: current standoff is below minimum.");
+      return false;
+    }
+    if (check.signed_standoff_m > kMaxCurrentStandoffM) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: current standoff exceeds maximum.");
+      return false;
+    }
+    if (check.signed_standoff_m <= config_.default_standoff_m + kFinalTargetMarginM) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: current standoff is already at/inside final target margin.");
+      return false;
+    }
+    if (check.lateral_error_m > config_.max_pre_approach_lateral_error_m) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: pre-approach lateral error exceeds limit.");
+      return false;
+    }
+    return true;
+  }
+
+  void contact_pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+  {
+    std::lock_guard<std::mutex> lock(contact_pose_mutex_);
+    if (!contact_pose_acquiring_) {
+      return;
+    }
+    if (now() < contact_pose_acquisition_start_ros_time_) {
+      return;
+    }
+    const rclcpp::Time msg_stamp(msg->header.stamp);
+    if (msg_stamp.nanoseconds() > 0 && msg_stamp < contact_pose_acquisition_start_ros_time_) {
+      return;
+    }
+    if (!pose_position_is_finite(*msg)) {
+      RCLCPP_ERROR(get_logger(), "Ignoring non-finite contact pose sample.");
+      return;
+    }
+    const std::string planning_frame = move_group_->getPlanningFrame();
+    if (!msg->header.frame_id.empty() && msg->header.frame_id != planning_frame) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Ignoring contact pose sample in frame '%s'; expected '%s'.",
+        msg->header.frame_id.c_str(),
+        planning_frame.c_str());
+      return;
+    }
+    if (contact_pose_samples_.size() < static_cast<std::size_t>(config_.pose_sample_count)) {
+      contact_pose_samples_.push_back(*msg);
+    }
+  }
+
+  static bool pose_position_is_finite(const geometry_msgs::msg::PoseStamped & msg)
+  {
+    return std::isfinite(msg.pose.position.x) &&
+      std::isfinite(msg.pose.position.y) &&
+      std::isfinite(msg.pose.position.z);
+  }
+
+  StandoffCheck compute_standoff(const Vector3 & contact)
+  {
+    geometry_msgs::msg::Pose wrist_pose;
+    if (!get_current_wrist_pose(wrist_pose)) {
+      throw std::runtime_error("failed to read current wrist pose for standoff check");
+    }
+    const auto q = normalized_quaternion(wrist_pose.orientation);
+    const Vector3 tool_axis = rotate_vector_by_quaternion(q, Vector3{0.0, 0.0, 1.0});
+    const Vector3 wrist{wrist_pose.position.x, wrist_pose.position.y, wrist_pose.position.z};
+    const Vector3 suction_tip = add(wrist, scale(tool_axis, kToolOffsetZ));
+    const Vector3 tip_to_contact = subtract(contact, suction_tip);
+    const double signed_standoff = dot(tip_to_contact, tool_axis);
+    const Vector3 lateral = subtract(tip_to_contact, scale(tool_axis, signed_standoff));
+    StandoffCheck check;
+    check.wrist = wrist;
+    check.suction_tip = suction_tip;
+    check.signed_standoff_m = signed_standoff;
+    check.lateral_error_m = vector_norm(lateral);
+    return check;
+  }
+
+  void log_standoff_check(const std::string & label, const Vector3 & contact)
+  {
+    const auto check = compute_standoff(contact);
+    RCLCPP_INFO(
+      get_logger(),
+      "%s standoff check: signed=%.4f m, lateral=%.4f m, suction_tip=(%.4f, %.4f, %.4f).",
+      label.c_str(),
+      check.signed_standoff_m,
+      check.lateral_error_m,
+      check.suction_tip.x,
+      check.suction_tip.y,
+      check.suction_tip.z);
+  }
+
+  bool get_current_wrist_pose(geometry_msgs::msg::Pose & pose)
+  {
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    std::string last_error;
+    while (std::chrono::steady_clock::now() < deadline) {
+      try {
+        const auto transform = tf_buffer_->lookupTransform(kBaseFrame, target_link_, tf2::TimePointZero);
+        pose.position.x = transform.transform.translation.x;
+        pose.position.y = transform.transform.translation.y;
+        pose.position.z = transform.transform.translation.z;
+        pose.orientation = transform.transform.rotation;
+        pose.orientation = normalized_quaternion(pose.orientation);
+        return true;
+      } catch (const tf2::TransformException & exc) {
+        last_error = exc.what();
+      }
+      std::this_thread::sleep_for(50ms);
+    }
+    RCLCPP_ERROR(
+      get_logger(),
+      "SAFETY BLOCKED: failed to lookup TF %s -> %s: %s",
+      kBaseFrame,
+      target_link_.c_str(),
+      last_error.c_str());
+    return false;
+  }
+
+  bool wait_for_joint_state(const double timeout_sec)
+  {
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration<double>(timeout_sec);
+    while (std::chrono::steady_clock::now() < deadline) {
+      {
+        std::lock_guard<std::mutex> lock(joint_state_mutex_);
+        if (has_latest_joint_state_) {
+          return true;
+        }
+      }
+      std::this_thread::sleep_for(50ms);
+    }
+    return false;
+  }
+
+  void joint_state_callback(const sensor_msgs::msg::JointState::SharedPtr msg)
+  {
+    std::lock_guard<std::mutex> lock(joint_state_mutex_);
+    latest_joint_state_ = *msg;
+    has_latest_joint_state_ = true;
+  }
+
+  bool current_joint_values_from_latest_joint_state(
+    const std::vector<std::string> & joint_names,
+    std::map<std::string, double> & joint_values) const
+  {
+    sensor_msgs::msg::JointState latest;
+    {
+      std::lock_guard<std::mutex> lock(joint_state_mutex_);
+      if (!has_latest_joint_state_) {
+        RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: no cached /joint_states message.");
+        return false;
+      }
+      latest = latest_joint_state_;
+    }
+
+    joint_values.clear();
+    for (const auto & joint_name : joint_names) {
+      const auto name_it = std::find(latest.name.begin(), latest.name.end(), joint_name);
+      if (name_it == latest.name.end()) {
+        RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: /joint_states missing joint '%s'.", joint_name.c_str());
+        return false;
+      }
+      const auto index = static_cast<std::size_t>(std::distance(latest.name.begin(), name_it));
+      if (index >= latest.position.size() || !std::isfinite(latest.position[index])) {
+        RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: invalid /joint_states position for '%s'.", joint_name.c_str());
+        return false;
+      }
+      joint_values[joint_name] = latest.position[index];
+    }
+    return true;
+  }
+
+  void set_start_state_from_joint_values(const std::map<std::string, double> & joint_values)
+  {
+    const auto robot_model = move_group_->getRobotModel();
+    moveit::core::RobotState start_state(robot_model);
+    start_state.setToDefaultValues();
+    start_state.setVariablePositions(joint_values);
+    start_state.update(true);
+    move_group_->setStartState(start_state);
+  }
+
+  bool target_covers_moveit_group(
+    const std::map<std::string, double> & target_joints,
+    const std::vector<std::string> & moveit_joint_names) const
+  {
+    for (const auto & joint_name : moveit_joint_names) {
+      if (target_joints.find(joint_name) == target_joints.end()) {
+        RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: target missing MoveIt joint '%s'.", joint_name.c_str());
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool current_to_target_guard_passed(
+    const std::map<std::string, double> & current_joints,
+    const std::map<std::string, double> & target_joints,
+    const std::vector<std::string> & moveit_joint_names,
+    const double max_joint_delta_rad) const
+  {
+    bool passed = true;
+    for (const auto & joint_name : moveit_joint_names) {
+      const double delta = std::fabs(target_joints.at(joint_name) - current_joints.at(joint_name));
+      RCLCPP_INFO(
+        get_logger(),
+        "Pre-plan joint check %s: current=%.6f target=%.6f delta=%.6f limit=%.6f.",
+        joint_name.c_str(),
+        current_joints.at(joint_name),
+        target_joints.at(joint_name),
+        delta,
+        max_joint_delta_rad);
+      if (!std::isfinite(delta) || delta > max_joint_delta_rad) {
+        passed = false;
+      }
+    }
+    if (!passed) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: current-to-target joint delta exceeded limit.");
+    }
+    return passed;
+  }
+
+  bool joint_delta_guard_passed(
+    const moveit::planning_interface::MoveGroupInterface::Plan & plan,
+    const double max_joint_delta_rad) const
+  {
+    const auto & joint_trajectory = plan.trajectory_.joint_trajectory;
+    const auto & joint_names = joint_trajectory.joint_names;
+    const auto & points = joint_trajectory.points;
+    if (joint_names.empty() || points.empty()) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: planned trajectory is empty.");
+      return false;
+    }
+    const auto & start_positions = points.front().positions;
+    const auto & final_positions = points.back().positions;
+    if (start_positions.size() != joint_names.size() || final_positions.size() != joint_names.size()) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: trajectory position count mismatch.");
+      return false;
+    }
+    bool passed = true;
+    for (std::size_t i = 0; i < joint_names.size(); ++i) {
+      const double delta = std::fabs(final_positions[i] - start_positions[i]);
+      if (!std::isfinite(delta) || delta > max_joint_delta_rad) {
+        RCLCPP_ERROR(
+          get_logger(),
+          "SAFETY BLOCKED: planned joint delta for %s is %.6f, limit %.6f.",
+          joint_names[i].c_str(),
+          delta,
+          max_joint_delta_rad);
+        passed = false;
+      }
+    }
+    return passed;
+  }
+
+  bool retime_cartesian_trajectory(
+    moveit_msgs::msg::RobotTrajectory & trajectory,
+    const double velocity_scaling,
+    const double acceleration_scaling)
+  {
+    const auto robot_model = move_group_->getRobotModel();
+    const auto * joint_model_group = robot_model ? robot_model->getJointModelGroup(planning_group_) : nullptr;
+    if (joint_model_group == nullptr) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: planning group unavailable for retiming.");
+      return false;
+    }
+    std::map<std::string, double> current_joints;
+    if (!current_joint_values_from_latest_joint_state(joint_model_group->getVariableNames(), current_joints)) {
+      return false;
+    }
+    moveit::core::RobotState reference_state(robot_model);
+    reference_state.setToDefaultValues();
+    reference_state.setVariablePositions(current_joints);
+    reference_state.update(true);
+    robot_trajectory::RobotTrajectory robot_trajectory(robot_model, planning_group_);
+    robot_trajectory.setRobotTrajectoryMsg(reference_state, trajectory);
+    trajectory_processing::IterativeParabolicTimeParameterization time_parameterization;
+    const bool retimed = time_parameterization.computeTimeStamps(
+      robot_trajectory, velocity_scaling, acceleration_scaling);
+    if (!retimed) {
+      RCLCPP_ERROR(get_logger(), "SAFETY BLOCKED: Cartesian trajectory retiming failed.");
+      return false;
+    }
+    robot_trajectory.getRobotTrajectoryMsg(trajectory);
+    return true;
+  }
+
+  std::vector<geometry_msgs::msg::Pose> make_cartesian_waypoints(
+    const geometry_msgs::msg::Pose & start_pose,
+    const geometry_msgs::msg::Pose & target_pose,
+    const double distance) const
+  {
+    std::size_t waypoint_count = 1;
+    if (distance > 1e-9) {
+      waypoint_count = static_cast<std::size_t>(std::ceil(distance / config_.cartesian_eef_step));
+      waypoint_count = std::max<std::size_t>(waypoint_count, 1);
+    }
+    std::vector<geometry_msgs::msg::Pose> waypoints;
+    waypoints.reserve(waypoint_count);
+    for (std::size_t index = 1; index <= waypoint_count; ++index) {
+      const double alpha = static_cast<double>(index) / static_cast<double>(waypoint_count);
+      geometry_msgs::msg::Pose waypoint;
+      waypoint.position.x = start_pose.position.x + alpha * (target_pose.position.x - start_pose.position.x);
+      waypoint.position.y = start_pose.position.y + alpha * (target_pose.position.y - start_pose.position.y);
+      waypoint.position.z = start_pose.position.z + alpha * (target_pose.position.z - start_pose.position.z);
+      waypoint.orientation = target_pose.orientation;
+      waypoints.push_back(waypoint);
+    }
+    return waypoints;
+  }
+
+  static std::map<std::string, double> staging_pose_joints()
+  {
+    return {
+      {"j1", -1.4155149936414828},
+      {"j2", -1.4576652436883306},
+      {"j3", -1.8781316413347113},
+      {"j4", 0.2190782725278865},
+      {"j5", 2.206984498534039},
+      {"j6", 2.3956715922950256}};
+  }
+
+  static std::map<std::string, double> true_30cm_joints()
+  {
+    return {
+      {"j1", -1.4692839497340737},
+      {"j2", -1.4472349732790353},
+      {"j3", -1.882239966790322},
+      {"j4", 0.21355745636436818},
+      {"j5", 2.2598535724942925},
+      {"j6", 2.398037278291343}};
+  }
+
+  std::string resolve_workspace_path(const std::string & path) const
+  {
+    const std::filesystem::path raw(path);
+    if (raw.is_absolute()) {
+      return raw.string();
+    }
+    return (std::filesystem::path(workspace_root_) / raw).string();
+  }
+
+  MotionConfig load_motion_config(const std::string & path) const
+  {
+    MotionConfig config;
+    std::ifstream input(path);
+    if (!input) {
+      RCLCPP_WARN(get_logger(), "Missing contact-box motion config %s; using built-in defaults.", path.c_str());
+      return config;
+    }
+
+    std::map<std::string, std::string> values;
+    std::string line;
+    while (std::getline(input, line)) {
+      const auto comment = line.find('#');
+      if (comment != std::string::npos) {
+        line = line.substr(0, comment);
+      }
+      line = trim(line);
+      if (line.empty()) {
+        continue;
+      }
+      const auto equals = line.find('=');
+      if (equals == std::string::npos) {
+        continue;
+      }
+      values[trim(line.substr(0, equals))] = trim(line.substr(equals + 1));
+    }
+
+    auto get_double = [&](const std::string & name, const double current) {
+        const auto it = values.find(name);
+        if (it == values.end() || it->second.empty()) {
+          return current;
+        }
+        return std::stod(it->second);
+      };
+    auto get_int = [&](const std::string & name, const int current) {
+        const auto it = values.find(name);
+        if (it == values.end() || it->second.empty()) {
+          return current;
+        }
+        return std::stoi(it->second);
+      };
+    auto get_string = [&](const std::string & name, const std::string & current) {
+        const auto it = values.find(name);
+        if (it == values.end() || it->second.empty()) {
+          return current;
+        }
+        return it->second;
+      };
+
+    config.reset_velocity_scaling = get_double("CONTACT_BOX_RESET_VELOCITY_SCALING", config.reset_velocity_scaling);
+    config.reset_acceleration_scaling = get_double("CONTACT_BOX_RESET_ACCELERATION_SCALING", config.reset_acceleration_scaling);
+    config.approach_velocity_scaling = get_double("CONTACT_BOX_APPROACH_VELOCITY_SCALING", config.approach_velocity_scaling);
+    config.approach_acceleration_scaling = get_double("CONTACT_BOX_APPROACH_ACCELERATION_SCALING", config.approach_acceleration_scaling);
+    config.press_velocity_scaling = get_double("CONTACT_BOX_PRESS_VELOCITY_SCALING", config.press_velocity_scaling);
+    config.press_acceleration_scaling = get_double("CONTACT_BOX_PRESS_ACCELERATION_SCALING", config.press_acceleration_scaling);
+    config.cartesian_eef_step = get_double("CONTACT_BOX_CARTESIAN_EEF_STEP", config.cartesian_eef_step);
+    config.cartesian_jump_threshold = get_double("CONTACT_BOX_CARTESIAN_JUMP_THRESHOLD", config.cartesian_jump_threshold);
+    config.cartesian_min_fraction = get_double("CONTACT_BOX_CARTESIAN_MIN_FRACTION", config.cartesian_min_fraction);
+    config.max_wrist_target_distance = get_double("CONTACT_BOX_MAX_WRIST_TARGET_DISTANCE", config.max_wrist_target_distance);
+    config.press_max_wrist_target_distance = get_double("CONTACT_BOX_PRESS_MAX_WRIST_TARGET_DISTANCE", config.press_max_wrist_target_distance);
+    config.reset_max_joint_delta_rad = get_double("CONTACT_BOX_RESET_MAX_JOINT_DELTA_RAD", config.reset_max_joint_delta_rad);
+    config.approach_max_joint_delta_rad = get_double("CONTACT_BOX_APPROACH_MAX_JOINT_DELTA_RAD", config.approach_max_joint_delta_rad);
+    config.press_max_joint_delta_rad = get_double("CONTACT_BOX_PRESS_MAX_JOINT_DELTA_RAD", config.press_max_joint_delta_rad);
+    config.default_standoff_m = get_double("CONTACT_BOX_DEFAULT_STANDOFF_M", config.default_standoff_m);
+    config.default_press_depth_m = get_double("CONTACT_BOX_DEFAULT_PRESS_DEPTH_M", config.default_press_depth_m);
+    config.max_press_depth_m = get_double("CONTACT_BOX_MAX_PRESS_DEPTH_M", config.max_press_depth_m);
+    config.target_offset_x_m = get_double("CONTACT_BOX_TARGET_OFFSET_X_M", config.target_offset_x_m);
+    config.target_offset_y_m = get_double("CONTACT_BOX_TARGET_OFFSET_Y_M", config.target_offset_y_m);
+    config.target_offset_z_m = get_double("CONTACT_BOX_TARGET_OFFSET_Z_M", config.target_offset_z_m);
+    config.max_pre_approach_lateral_error_m = get_double(
+      "CONTACT_BOX_MAX_PRE_APPROACH_LATERAL_ERROR_M", config.max_pre_approach_lateral_error_m);
+    config.cover_lift_z_m = get_double("CONTACT_BOX_COVER_LIFT_Z_M", config.cover_lift_z_m);
+    config.min_actual_lift_delta_z_m = get_double(
+      "CONTACT_BOX_MIN_ACTUAL_LIFT_DELTA_Z_M", config.min_actual_lift_delta_z_m);
+    config.cover_pull_out_axis = get_string("CONTACT_BOX_COVER_PULL_OUT_AXIS", config.cover_pull_out_axis);
+    config.cover_pull_out_m = get_double("CONTACT_BOX_COVER_PULL_OUT_M", config.cover_pull_out_m);
+    config.suction_settle_delay_sec = get_double(
+      "CONTACT_BOX_SUCTION_SETTLE_DELAY_SEC", config.suction_settle_delay_sec);
+    config.cover_mount_offset_x_m = get_double("CONTACT_BOX_COVER_MOUNT_OFFSET_X_M", config.cover_mount_offset_x_m);
+    config.cover_mount_offset_y_m = get_double("CONTACT_BOX_COVER_MOUNT_OFFSET_Y_M", config.cover_mount_offset_y_m);
+    config.cover_mount_offset_z_m = get_double("CONTACT_BOX_COVER_MOUNT_OFFSET_Z_M", config.cover_mount_offset_z_m);
+    config.pose_sample_count = get_int("CONTACT_BOX_POSE_SAMPLE_COUNT", config.pose_sample_count);
+    config.pose_sample_timeout_sec = get_double("CONTACT_BOX_POSE_SAMPLE_TIMEOUT_SEC", config.pose_sample_timeout_sec);
+    config.pose_max_spread_m = get_double("CONTACT_BOX_POSE_MAX_SPREAD_M", config.pose_max_spread_m);
+    config.max_live_vs_manual_delta_m = get_double(
+      "CONTACT_BOX_MAX_LIVE_VS_MANUAL_DELTA_M", config.max_live_vs_manual_delta_m);
+
+    validate_motion_config(config);
+    return config;
+  }
+
+  void validate_motion_config(const MotionConfig & config) const
+  {
+    auto require_range = [](const double value, const double low, const double high, const char * name) {
+        if (!std::isfinite(value) || value < low || value > high) {
+          throw std::runtime_error(std::string("unsafe contact-box config value: ") + name);
+        }
+      };
+    require_range(config.reset_velocity_scaling, 0.000001, 0.20, "CONTACT_BOX_RESET_VELOCITY_SCALING");
+    require_range(config.reset_acceleration_scaling, 0.000001, 0.20, "CONTACT_BOX_RESET_ACCELERATION_SCALING");
+    require_range(config.approach_velocity_scaling, 0.000001, 0.20, "CONTACT_BOX_APPROACH_VELOCITY_SCALING");
+    require_range(config.approach_acceleration_scaling, 0.000001, 0.20, "CONTACT_BOX_APPROACH_ACCELERATION_SCALING");
+    require_range(config.press_velocity_scaling, 0.000001, 0.20, "CONTACT_BOX_PRESS_VELOCITY_SCALING");
+    require_range(config.press_acceleration_scaling, 0.000001, 0.20, "CONTACT_BOX_PRESS_ACCELERATION_SCALING");
+    require_range(config.cartesian_eef_step, 0.000001, 0.005, "CONTACT_BOX_CARTESIAN_EEF_STEP");
+    require_range(config.cartesian_jump_threshold, 0.0, 10.0, "CONTACT_BOX_CARTESIAN_JUMP_THRESHOLD");
+    require_range(config.cartesian_min_fraction, 0.000001, 1.0, "CONTACT_BOX_CARTESIAN_MIN_FRACTION");
+    require_range(config.max_wrist_target_distance, 0.000001, 0.700, "CONTACT_BOX_MAX_WRIST_TARGET_DISTANCE");
+    require_range(config.press_max_wrist_target_distance, 0.000001, 0.100, "CONTACT_BOX_PRESS_MAX_WRIST_TARGET_DISTANCE");
+    require_range(config.reset_max_joint_delta_rad, 0.000001, 2.000, "CONTACT_BOX_RESET_MAX_JOINT_DELTA_RAD");
+    require_range(config.approach_max_joint_delta_rad, 0.000001, 2.000, "CONTACT_BOX_APPROACH_MAX_JOINT_DELTA_RAD");
+    require_range(config.press_max_joint_delta_rad, 0.000001, 0.200, "CONTACT_BOX_PRESS_MAX_JOINT_DELTA_RAD");
+    require_range(config.default_standoff_m, 0.0, 0.020, "CONTACT_BOX_DEFAULT_STANDOFF_M");
+    require_range(config.default_press_depth_m, 0.0, config.max_press_depth_m, "CONTACT_BOX_DEFAULT_PRESS_DEPTH_M");
+    require_range(config.max_press_depth_m, 0.000001, 0.010, "CONTACT_BOX_MAX_PRESS_DEPTH_M");
+    require_range(config.target_offset_x_m, -0.100, 0.100, "CONTACT_BOX_TARGET_OFFSET_X_M");
+    require_range(config.target_offset_y_m, -0.100, 0.100, "CONTACT_BOX_TARGET_OFFSET_Y_M");
+    require_range(config.target_offset_z_m, -0.100, 0.100, "CONTACT_BOX_TARGET_OFFSET_Z_M");
+    require_range(config.max_pre_approach_lateral_error_m, 0.000001, 0.100, "CONTACT_BOX_MAX_PRE_APPROACH_LATERAL_ERROR_M");
+    require_range(config.cover_lift_z_m, 0.000001, 0.050, "CONTACT_BOX_COVER_LIFT_Z_M");
+    require_range(
+      config.min_actual_lift_delta_z_m, 0.0, config.cover_lift_z_m,
+      "CONTACT_BOX_MIN_ACTUAL_LIFT_DELTA_Z_M");
+    require_range(config.cover_pull_out_m, 0.000001, 0.250, "CONTACT_BOX_COVER_PULL_OUT_M");
+    require_range(config.suction_settle_delay_sec, 0.0, 10.0, "CONTACT_BOX_SUCTION_SETTLE_DELAY_SEC");
+    if (config.cover_pull_out_axis != "opposite_tool_axis") {
+      throw std::runtime_error("unsafe contact-box config value: CONTACT_BOX_COVER_PULL_OUT_AXIS");
+    }
+    require_range(config.cover_mount_offset_x_m, -0.050, 0.050, "CONTACT_BOX_COVER_MOUNT_OFFSET_X_M");
+    require_range(config.cover_mount_offset_y_m, -0.050, 0.050, "CONTACT_BOX_COVER_MOUNT_OFFSET_Y_M");
+    require_range(config.cover_mount_offset_z_m, -0.050, 0.050, "CONTACT_BOX_COVER_MOUNT_OFFSET_Z_M");
+    if (config.pose_sample_count <= 0 || config.pose_sample_count > 100) {
+      throw std::runtime_error("unsafe contact-box config value: CONTACT_BOX_POSE_SAMPLE_COUNT");
+    }
+    require_range(config.pose_sample_timeout_sec, 0.000001, 60.0, "CONTACT_BOX_POSE_SAMPLE_TIMEOUT_SEC");
+    require_range(config.pose_max_spread_m, 0.000001, 0.100, "CONTACT_BOX_POSE_MAX_SPREAD_M");
+    require_range(config.max_live_vs_manual_delta_m, 0.0, 1.000, "CONTACT_BOX_MAX_LIVE_VS_MANUAL_DELTA_M");
+  }
+
+  std::map<std::string, RecordedPose> load_recorded_poses(const std::string & path) const
+  {
+    const std::string text = read_text_file(path);
+    return {
+      {"cover_mount_approach", parse_recorded_pose(text, "cover_mount_approach")},
+      {"cover_mount_place", parse_recorded_pose(text, "cover_mount_place")}};
+  }
+
+  static std::string read_text_file(const std::string & path)
+  {
+    std::ifstream input(path);
+    if (!input) {
+      throw std::runtime_error("failed to open " + path);
+    }
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+  }
+
+  RecordedPose parse_recorded_pose(const std::string & text, const std::string & name) const
+  {
+    const std::string key = "\"" + name + "\"";
+    const auto key_pos = text.find(key);
+    if (key_pos == std::string::npos) {
+      throw std::runtime_error("missing recorded pose " + name);
+    }
+    const auto object_start = text.find('{', key_pos);
+    const auto object_end = find_matching_brace(text, object_start);
+    const std::string block = text.substr(object_start, object_end - object_start + 1);
+
+    RecordedPose pose;
+    pose.joints = parse_joint_state(block, name);
+    pose.position = parse_vector_object(block, "translation_m", name);
+    pose.orientation = parse_quaternion_object(block, "rotation_xyzw", name);
+    pose.orientation = normalized_quaternion(pose.orientation);
+    return pose;
+  }
+
+  static std::size_t find_matching_brace(const std::string & text, const std::size_t open_pos)
+  {
+    if (open_pos == std::string::npos || text[open_pos] != '{') {
+      throw std::runtime_error("invalid JSON-like object");
+    }
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (std::size_t i = open_pos; i < text.size(); ++i) {
+      const char c = text[i];
+      if (in_string) {
+        if (escaped) {
+          escaped = false;
+        } else if (c == '\\') {
+          escaped = true;
+        } else if (c == '"') {
+          in_string = false;
+        }
+        continue;
+      }
+      if (c == '"') {
+        in_string = true;
+      } else if (c == '{') {
+        depth += 1;
+      } else if (c == '}') {
+        depth -= 1;
+        if (depth == 0) {
+          return i;
+        }
+      }
+    }
+    throw std::runtime_error("unterminated JSON-like object");
+  }
+
+  static std::string extract_named_object(
+    const std::string & block,
+    const std::string & name)
+  {
+    const std::string key = "\"" + name + "\"";
+    const auto key_pos = block.find(key);
+    if (key_pos == std::string::npos) {
+      throw std::runtime_error("missing object " + name);
+    }
+    const auto object_start = block.find('{', key_pos);
+    const auto object_end = find_matching_brace(block, object_start);
+    return block.substr(object_start, object_end - object_start + 1);
+  }
+
+  static double extract_number(const std::string & block, const std::string & name)
+  {
+    const std::regex number_regex(
+      "\"" + name + "\"\\s*:\\s*(-?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:[eE][-+]?[0-9]+)?)");
+    std::smatch match;
+    if (!std::regex_search(block, match, number_regex)) {
+      throw std::runtime_error("missing numeric field " + name);
+    }
+    return std::stod(match[1].str());
+  }
+
+  static Vector3 parse_vector_object(
+    const std::string & block,
+    const std::string & object_name,
+    const std::string & pose_name)
+  {
+    const auto object = extract_named_object(block, object_name);
+    Vector3 vector{
+      extract_number(object, "x"),
+      extract_number(object, "y"),
+      extract_number(object, "z")};
+    if (!std::isfinite(vector.x) || !std::isfinite(vector.y) || !std::isfinite(vector.z)) {
+      throw std::runtime_error("non-finite " + object_name + " in " + pose_name);
+    }
+    return vector;
+  }
+
+  static geometry_msgs::msg::Quaternion parse_quaternion_object(
+    const std::string & block,
+    const std::string & object_name,
+    const std::string & pose_name)
+  {
+    const auto object = extract_named_object(block, object_name);
+    geometry_msgs::msg::Quaternion q;
+    q.x = extract_number(object, "x");
+    q.y = extract_number(object, "y");
+    q.z = extract_number(object, "z");
+    q.w = extract_number(object, "w");
+    if (!std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z) || !std::isfinite(q.w)) {
+      throw std::runtime_error("non-finite " + object_name + " in " + pose_name);
+    }
+    return q;
+  }
+
+  static std::map<std::string, double> parse_joint_state(
+    const std::string & block,
+    const std::string & pose_name)
+  {
+    const auto joint_state = extract_named_object(block, "joint_state");
+    const std::regex names_regex("\"names\"\\s*:\\s*\\[([^\\]]+)\\]");
+    const std::regex positions_regex("\"positions\"\\s*:\\s*\\[([^\\]]+)\\]");
+    std::smatch names_match;
+    std::smatch positions_match;
+    if (!std::regex_search(joint_state, names_match, names_regex) ||
+      !std::regex_search(joint_state, positions_match, positions_regex))
+    {
+      throw std::runtime_error("invalid joint_state in " + pose_name);
+    }
+    std::vector<std::string> names;
+    const std::string names_text = names_match[1].str();
+    const std::regex name_regex("\"([^\"]+)\"");
+    for (auto it = std::sregex_iterator(names_text.begin(), names_text.end(), name_regex);
+      it != std::sregex_iterator(); ++it)
+    {
+      names.push_back((*it)[1].str());
+    }
+    std::vector<double> positions;
+    std::stringstream stream(positions_match[1].str());
+    std::string token;
+    while (std::getline(stream, token, ',')) {
+      positions.push_back(std::stod(trim(token)));
+    }
+    if (names.size() != positions.size()) {
+      throw std::runtime_error("joint_state names/positions size mismatch in " + pose_name);
+    }
+    std::map<std::string, double> joints;
+    for (std::size_t i = 0; i < names.size(); ++i) {
+      joints[names[i]] = positions[i];
+    }
+    for (const auto & joint : {"j1", "j2", "j3", "j4", "j5", "j6"}) {
+      if (joints.find(joint) == joints.end() || !std::isfinite(joints.at(joint))) {
+        throw std::runtime_error("missing or invalid joint " + std::string(joint) + " in " + pose_name);
+      }
+    }
+    return joints;
+  }
+
+  std::string action_name_;
+  std::string planning_group_;
+  std::string target_link_;
+  std::string contact_pose_topic_;
+  std::string workspace_root_;
+  std::string motion_config_file_;
+  std::string recorded_poses_file_;
+  MotionConfig config_;
+  std::map<std::string, RecordedPose> recorded_poses_;
+
+  std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group_;
+  std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr contact_pose_sub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr initialize_suction_pub_;
+  rclcpp::Client<fairino_msgs::srv::FairinoSuctionCommand>::SharedPtr suction_client_;
+  rclcpp_action::Server<Action>::SharedPtr action_server_;
+
+  mutable std::mutex joint_state_mutex_;
+  sensor_msgs::msg::JointState latest_joint_state_;
+  bool has_latest_joint_state_{false};
+
+  std::mutex contact_pose_mutex_;
+  bool contact_pose_acquiring_{false};
+  rclcpp::Time contact_pose_acquisition_start_ros_time_;
+  std::vector<geometry_msgs::msg::PoseStamped> contact_pose_samples_;
+
+  Vector3 raw_contact_pose_;
+  Vector3 adjusted_contact_pose_;
+  geometry_msgs::msg::Pose current_pickout_pose_;
+  geometry_msgs::msg::Pose lift_target_pose_;
+
+  std::atomic_bool goal_active_{false};
+};
+
+int main(int argc, char * argv[])
+{
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared<ContactBoxCoverRemovalActionServer>();
+  try {
+    node->initialize();
+  } catch (const std::exception & exc) {
+    RCLCPP_ERROR(
+      node->get_logger(),
+      "Failed to initialize contact-box cover-removal action server: %s. "
+      "Use the provided launch file so MoveIt parameters are loaded.",
+      exc.what());
+    rclcpp::shutdown();
+    return 1;
+  }
+
+  rclcpp::executors::MultiThreadedExecutor executor;
+  executor.add_node(node);
+  try {
+    executor.spin();
+  } catch (const std::exception & exc) {
+    RCLCPP_ERROR(node->get_logger(), "Exception during action-server spin: %s", exc.what());
+  }
+  executor.cancel();
+  if (rclcpp::ok()) {
+    rclcpp::shutdown();
+  }
+  return 0;
+}

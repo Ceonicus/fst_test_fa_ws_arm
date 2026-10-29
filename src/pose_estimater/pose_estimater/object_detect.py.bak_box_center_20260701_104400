@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+
+import cv2
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+from geometry_msgs.msg import Point
+from ultralytics import YOLO
+
+
+DEFAULT_IMAGE_TOPIC = '/camera/camera/color/image_raw'
+DEFAULT_PIXEL_TOPIC = '/pixel_coordinates'
+DEFAULT_ANNOTATED_TOPIC = '/yolo/detections'
+DEFAULT_MODEL_PATH = '~/Desktop/fst_test_fa_ws_arm/yolo_custom.pt'
+DEFAULT_TARGET_CLASS = 'Interlock w/ Cover'
+DEFAULT_WINDOW_NAME = 'Contact Box Detector'
+
+
+class YoloObjectDetector(Node):
+    def __init__(self):
+        super().__init__('yolo_object_detector')
+
+        self.declare_parameter('image_topic', DEFAULT_IMAGE_TOPIC)
+        self.declare_parameter('pixel_topic', DEFAULT_PIXEL_TOPIC)
+        self.declare_parameter('annotated_topic', DEFAULT_ANNOTATED_TOPIC)
+        self.declare_parameter('output_topic', DEFAULT_ANNOTATED_TOPIC)
+        self.declare_parameter('model_path', DEFAULT_MODEL_PATH)
+        self.declare_parameter('target_class', DEFAULT_TARGET_CLASS)
+        self.declare_parameter('accepted_class_names', '')
+        self.declare_parameter('target_class_id', -1)
+        self.declare_parameter('confidence_threshold', 0.5)
+        self.declare_parameter('publish_annotated', True)
+        self.declare_parameter('log_all_detections', True)
+        self.declare_parameter('rejected_log_throttle_sec', 2.0)
+        self.declare_parameter('display_window', False)
+        self.declare_parameter('window_name', DEFAULT_WINDOW_NAME)
+        self.declare_parameter('display_scale', 1.0)
+
+        self.image_topic = self.get_parameter('image_topic').value
+        self.pixel_topic = self.get_parameter('pixel_topic').value
+        annotated_topic = self.get_parameter('annotated_topic').value
+        legacy_output_topic = self.get_parameter('output_topic').value
+        self.model_path = self.resolve_model_path(self.get_parameter('model_path').value)
+        self.target_class = self.get_parameter('target_class').value
+        self.target_class_id = int(self.get_parameter('target_class_id').value)
+        self.conf_threshold = float(self.get_parameter('confidence_threshold').value)
+        self.publish_annotated = bool(self.get_parameter('publish_annotated').value)
+        self.log_all_detections = bool(self.get_parameter('log_all_detections').value)
+        self.rejected_log_throttle_sec = float(
+            self.get_parameter('rejected_log_throttle_sec').value
+        )
+        self.display_window_requested = bool(self.get_parameter('display_window').value)
+        self.display_window = self.display_window_requested
+        self.window_name = str(self.get_parameter('window_name').value)
+        self.display_scale = float(self.get_parameter('display_scale').value)
+        if self.display_scale <= 0.0:
+            self.get_logger().warn(
+                f'display_scale must be > 0.0; received {self.display_scale}. '
+                'Using 1.0 instead.'
+            )
+            self.display_scale = 1.0
+        self.annotated_topic = self.select_annotated_topic(
+            annotated_topic,
+            legacy_output_topic,
+        )
+        self.accepted_class_names = self.parse_accepted_class_names(
+            self.target_class,
+            self.get_parameter('accepted_class_names').value,
+        )
+
+        if not self.model_path.is_file():
+            message = f'YOLO model file not found: {self.model_path}'
+            self.get_logger().fatal(message)
+            raise FileNotFoundError(message)
+
+        try:
+            self.model = YOLO(str(self.model_path))
+        except Exception as exc:
+            message = f'Failed to load YOLO model from {self.model_path}: {exc}'
+            self.get_logger().fatal(message)
+            raise RuntimeError(message) from exc
+        self.bridge = CvBridge()
+        self.first_image_logged = False
+        self.last_throttled_log_time = {}
+
+        self.subscription = self.create_subscription(
+            Image,
+            self.image_topic,
+            self.image_callback,
+            10)
+        self.annotated_publisher = None
+        if self.publish_annotated:
+            self.annotated_publisher = self.create_publisher(Image, self.annotated_topic, 10)
+        self.coord_publisher = self.create_publisher(Point, self.pixel_topic, 10)
+
+        self.get_logger().warn(
+            'VISION ONLY: object_detect publishes pixels and annotated images only; '
+            'it does not publish /object_pose and does not command robot motion.'
+        )
+        self.get_logger().info(
+            'YOLO detector configured: '
+            f'model_path={self.model_path}, image_topic={self.image_topic}, '
+            f'pixel_topic={self.pixel_topic}, annotated_topic={self.annotated_topic}, '
+            f'publish_annotated={self.publish_annotated}, '
+            f'target_class={self.target_class!r}, '
+            f'accepted_class_names={sorted(self.accepted_class_names)}, '
+            f'target_class_id={self.target_class_id}, '
+            f'confidence_threshold={self.conf_threshold:.3f}, '
+            f'log_all_detections={self.log_all_detections}, '
+            f'display_window={self.display_window}, '
+            f'window_name={self.window_name!r}, '
+            f'display_scale={self.display_scale:.3f}'
+        )
+
+    def image_callback(self, msg):
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+
+            if not self.first_image_logged:
+                self.get_logger().info(
+                    f'First image received: encoding={msg.encoding}, '
+                    f'converted_encoding=bgr8, size={cv_image.shape[1]}x{cv_image.shape[0]}'
+                )
+                self.first_image_logged = True
+
+            results = self.model(cv_image, conf=self.conf_threshold, verbose=False)
+            result = results[0] if results else None
+            class_names = result.names if result is not None else {}
+            boxes = result.boxes if result is not None else None
+            if not results:
+                self.throttled_info('no_results', 'YOLO returned no result object.')
+            target_detections = []
+
+            if result is None:
+                pass
+            elif boxes is None or len(boxes) == 0:
+                self.throttled_info(
+                    'no_detections',
+                    f'No YOLO detections above confidence_threshold={self.conf_threshold:.3f}.'
+                )
+            else:
+                for box, cls, conf in zip(boxes.xyxy, boxes.cls, boxes.conf):
+                    class_id = int(cls.item())
+                    confidence = float(conf.item())
+                    class_name = self.class_name_for_id(class_names, class_id)
+                    x_min, y_min, x_max, y_max = [float(value) for value in box.tolist()]
+                    center_x = (x_min + x_max) / 2.0
+                    center_y = (y_min + y_max) / 2.0
+                    width = x_max - x_min
+                    height = y_max - y_min
+
+                    detection = {
+                        'class_id': class_id,
+                        'class_name': class_name,
+                        'confidence': confidence,
+                        'x_min': x_min,
+                        'y_min': y_min,
+                        'x_max': x_max,
+                        'y_max': y_max,
+                        'center_x': center_x,
+                        'center_y': center_y,
+                        'width': width,
+                        'height': height,
+                    }
+
+                    if self.is_target_detection(class_id, class_name):
+                        target_detections.append(detection)
+                        self.log_detection('accepted', detection)
+                    elif self.log_all_detections:
+                        self.log_rejected_detection(detection)
+
+            best = None
+            if target_detections:
+                best = max(target_detections, key=lambda item: item['confidence'])
+                u = int(round(best['center_x']))
+                v = int(round(best['center_y']))
+
+                point_msg = Point()
+                point_msg.x = float(u)
+                point_msg.y = float(v)
+                point_msg.z = 0.0
+                self.coord_publisher.publish(point_msg)
+
+                self.get_logger().info(
+                    'Published best contact-box pixel: '
+                    f'class={best["class_name"]!r}, class_id={best["class_id"]}, '
+                    f'confidence={best["confidence"]:.3f}, pixel=({u}, {v}), '
+                    f'bbox_size=({best["width"]:.1f}x{best["height"]:.1f})'
+                )
+            else:
+                self.throttled_info(
+                    'no_target',
+                    'No accepted contact-box detection in this frame; '
+                    f'accepted_class_names={sorted(self.accepted_class_names)}, '
+                    f'target_class_id={self.target_class_id}.'
+                )
+
+            annotated_frame = self.build_annotated_frame(cv_image, target_detections, best)
+
+            if self.publish_annotated and self.annotated_publisher is not None:
+                output_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding='bgr8')
+                output_msg.header = msg.header
+                self.annotated_publisher.publish(output_msg)
+
+            self.show_display_window(annotated_frame)
+
+        except Exception as e:
+            self.get_logger().error(f'Error processing image: {str(e)}')
+
+    def build_annotated_frame(self, cv_image, target_detections, best_detection):
+        annotated_frame = cv_image.copy()
+        if not target_detections:
+            self.draw_text_lines(
+                annotated_frame,
+                ['No accepted target'],
+                origin=(12, 32),
+                text_color=(255, 255, 255),
+                background_color=(30, 30, 30),
+            )
+            return annotated_frame
+
+        for detection in target_detections:
+            is_best = detection is best_detection
+            color = (0, 255, 0) if is_best else (0, 200, 255)
+            thickness = 3 if is_best else 2
+            x_min = int(round(detection['x_min']))
+            y_min = int(round(detection['y_min']))
+            x_max = int(round(detection['x_max']))
+            y_max = int(round(detection['y_max']))
+            center_x = int(round(detection['center_x']))
+            center_y = int(round(detection['center_y']))
+
+            cv2.rectangle(annotated_frame, (x_min, y_min), (x_max, y_max), color, thickness)
+            cv2.circle(annotated_frame, (center_x, center_y), 5, color, -1)
+
+            label_lines = [
+                f'{detection["class_name"]} {detection["confidence"]:.2f}',
+                f'center=({center_x}, {center_y})',
+            ]
+            text_y = max(24, y_min - 8 - (len(label_lines) - 1) * 22)
+            self.draw_text_lines(
+                annotated_frame,
+                label_lines,
+                origin=(x_min, text_y),
+                text_color=(255, 255, 255),
+                background_color=color,
+            )
+
+        return annotated_frame
+
+    def draw_text_lines(
+        self,
+        image,
+        lines,
+        origin,
+        text_color=(255, 255, 255),
+        background_color=(30, 30, 30),
+    ):
+        x, y = origin
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.6
+        thickness = 2
+        padding = 4
+        line_gap = 6
+        max_width = image.shape[1]
+
+        for index, line in enumerate(lines):
+            (text_width, text_height), baseline = cv2.getTextSize(
+                line,
+                font,
+                font_scale,
+                thickness,
+            )
+            line_x = max(0, min(int(x), max_width - text_width - padding * 2))
+            line_y = int(y + index * (text_height + baseline + line_gap))
+            top = max(0, line_y - text_height - padding)
+            bottom = min(image.shape[0] - 1, line_y + baseline + padding)
+            right = min(max_width - 1, line_x + text_width + padding * 2)
+
+            cv2.rectangle(
+                image,
+                (line_x, top),
+                (right, bottom),
+                background_color,
+                -1,
+            )
+            cv2.putText(
+                image,
+                line,
+                (line_x + padding, line_y),
+                font,
+                font_scale,
+                text_color,
+                thickness,
+                cv2.LINE_AA,
+            )
+
+    def show_display_window(self, annotated_frame):
+        if not self.display_window:
+            return
+        if not self.display_available():
+            self.get_logger().warn(
+                'display_window was requested, but no desktop display was detected '
+                '(DISPLAY and WAYLAND_DISPLAY are unset). Disabling OpenCV GUI display; '
+                f'view {self.annotated_topic} with rqt_image_view instead.'
+            )
+            self.display_window = False
+            return
+
+        try:
+            annotated_frame = self.scale_display_frame(annotated_frame)
+            cv2.imshow(self.window_name, annotated_frame)
+            cv2.waitKey(1)
+        except cv2.error as exc:
+            self.get_logger().warn(
+                'OpenCV GUI display failed; disabling display_window. '
+                'This usually means the process is running headless or over SSH without '
+                f'display forwarding. Error: {exc}'
+            )
+            self.display_window = False
+        except Exception as exc:
+            self.get_logger().warn(
+                'OpenCV GUI display failed unexpectedly; disabling display_window. '
+                f'Error: {exc}'
+            )
+            self.display_window = False
+
+    def scale_display_frame(self, annotated_frame):
+        if abs(self.display_scale - 1.0) < 1e-6:
+            return annotated_frame
+        height, width = annotated_frame.shape[:2]
+        scaled_width = max(1, int(round(width * self.display_scale)))
+        scaled_height = max(1, int(round(height * self.display_scale)))
+        return cv2.resize(
+            annotated_frame,
+            (scaled_width, scaled_height),
+            interpolation=cv2.INTER_AREA if self.display_scale < 1.0 else cv2.INTER_LINEAR,
+        )
+
+    @staticmethod
+    def display_available():
+        return bool(os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'))
+
+    def close_display_windows(self):
+        if not self.display_window_requested:
+            return
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error as exc:
+            self.get_logger().warn(f'OpenCV GUI cleanup failed: {exc}')
+
+    def is_target_detection(self, class_id, class_name):
+        if self.target_class_id >= 0 and class_id == self.target_class_id:
+            return True
+        return self.normalize_class_name(class_name) in self.accepted_class_names
+
+    def log_detection(self, status, detection):
+        if not self.log_all_detections:
+            return
+        self.get_logger().info(
+            f'{status} detection: class={detection["class_name"]!r}, '
+            f'class_id={detection["class_id"]}, confidence={detection["confidence"]:.3f}, '
+            f'bbox_center=({detection["center_x"]:.1f}, {detection["center_y"]:.1f}), '
+            f'bbox_size=({detection["width"]:.1f}x{detection["height"]:.1f})'
+        )
+
+    def log_rejected_detection(self, detection):
+        key = f'rejected:{detection["class_id"]}:{detection["class_name"]}'
+        self.throttled_info(
+            key,
+            f'rejected detection: class={detection["class_name"]!r}, '
+            f'class_id={detection["class_id"]}, confidence={detection["confidence"]:.3f}, '
+            f'bbox_center=({detection["center_x"]:.1f}, {detection["center_y"]:.1f}), '
+            f'bbox_size=({detection["width"]:.1f}x{detection["height"]:.1f}), '
+            'reason=class does not match configured contact-box target.'
+        )
+
+    def throttled_info(self, key, message):
+        now = self.get_clock().now().nanoseconds / 1e9
+        last = self.last_throttled_log_time.get(key)
+        if last is None or now - last >= self.rejected_log_throttle_sec:
+            self.get_logger().info(message)
+            self.last_throttled_log_time[key] = now
+
+    def select_annotated_topic(self, annotated_topic, legacy_output_topic):
+        if annotated_topic == DEFAULT_ANNOTATED_TOPIC and legacy_output_topic != DEFAULT_ANNOTATED_TOPIC:
+            self.get_logger().warn(
+                'Parameter output_topic is kept for compatibility; use annotated_topic instead.'
+            )
+            return legacy_output_topic
+        if (
+            annotated_topic != DEFAULT_ANNOTATED_TOPIC
+            and legacy_output_topic != DEFAULT_ANNOTATED_TOPIC
+            and legacy_output_topic != annotated_topic
+        ):
+            self.get_logger().warn(
+                'Both annotated_topic and legacy output_topic were set; using annotated_topic.'
+            )
+        return annotated_topic
+
+    @staticmethod
+    def parse_accepted_class_names(target_class, accepted_class_names):
+        names = []
+        if target_class:
+            names.append(target_class)
+        if accepted_class_names:
+            names.extend(
+                item.strip()
+                for item in str(accepted_class_names).split(',')
+                if item.strip()
+            )
+        return {YoloObjectDetector.normalize_class_name(name) for name in names if name}
+
+    @staticmethod
+    def class_name_for_id(class_names, class_id):
+        if isinstance(class_names, dict):
+            return str(class_names.get(class_id, class_id))
+        if 0 <= class_id < len(class_names):
+            return str(class_names[class_id])
+        return str(class_id)
+
+    @staticmethod
+    def normalize_class_name(class_name):
+        return ' '.join(str(class_name).strip().split()).casefold()
+
+    @staticmethod
+    def resolve_model_path(model_path):
+        expanded = os.path.expandvars(str(model_path))
+        return Path(expanded).expanduser().resolve()
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = None
+    try:
+        node = YoloObjectDetector()
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if node is not None:
+            node.close_display_windows()
+            node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()

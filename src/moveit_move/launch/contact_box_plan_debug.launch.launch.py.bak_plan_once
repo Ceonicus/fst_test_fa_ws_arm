@@ -1,0 +1,94 @@
+import os
+
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+from moveit_configs_utils import MoveItConfigsBuilder
+
+
+def generate_launch_description():
+    robotname = "fairino5_v6_robot"
+    packagename = "fairino5_v6_moveit2_config"
+    moveit_controllers_path = os.path.join(
+        get_package_share_directory(packagename),
+        "config",
+        "moveit_controllers.yaml",
+    )
+
+    moveit_config = (
+        MoveItConfigsBuilder(robotname, package_name=packagename)
+        .robot_description(file_path="config/" + robotname + ".urdf.xacro")
+        .trajectory_execution(file_path=moveit_controllers_path)
+        .planning_pipelines(pipelines=["ompl", "pilz_industrial_motion_planner"])
+        .to_moveit_configs()
+    )
+
+    input_topic = LaunchConfiguration("input_topic")
+    planning_group = LaunchConfiguration("planning_group")
+    target_link = LaunchConfiguration("target_link")
+    execute_motion = LaunchConfiguration("execute_motion")
+    approach_offset_x = LaunchConfiguration("approach_offset_x")
+    approach_offset_y = LaunchConfiguration("approach_offset_y")
+    approach_offset_z = LaunchConfiguration("approach_offset_z")
+    use_tool_offset = LaunchConfiguration("use_tool_offset")
+    tool_offset_x = LaunchConfiguration("tool_offset_x")
+    tool_offset_y = LaunchConfiguration("tool_offset_y")
+    tool_offset_z = LaunchConfiguration("tool_offset_z")
+    use_fixed_orientation = LaunchConfiguration("use_fixed_orientation")
+    target_qx = LaunchConfiguration("target_qx")
+    target_qy = LaunchConfiguration("target_qy")
+    target_qz = LaunchConfiguration("target_qz")
+    target_qw = LaunchConfiguration("target_qw")
+
+    contact_box_plan_debug = Node(
+        package="moveit_move",
+        executable="contact_box_plan_debug",
+        name="contact_box_plan_debug",
+        output="screen",
+        parameters=[
+            moveit_config.to_dict(),
+            {
+                "input_topic": input_topic,
+                "planning_group": planning_group,
+                "target_link": target_link,
+                "execute_motion": ParameterValue(execute_motion, value_type=bool),
+                "approach_offset_x": ParameterValue(approach_offset_x, value_type=float),
+                "approach_offset_y": ParameterValue(approach_offset_y, value_type=float),
+                "approach_offset_z": ParameterValue(approach_offset_z, value_type=float),
+                "use_tool_offset": ParameterValue(use_tool_offset, value_type=bool),
+                "tool_offset_x": ParameterValue(tool_offset_x, value_type=float),
+                "tool_offset_y": ParameterValue(tool_offset_y, value_type=float),
+                "tool_offset_z": ParameterValue(tool_offset_z, value_type=float),
+                "use_fixed_orientation": ParameterValue(use_fixed_orientation, value_type=bool),
+                "target_qx": ParameterValue(target_qx, value_type=float),
+                "target_qy": ParameterValue(target_qy, value_type=float),
+                "target_qz": ParameterValue(target_qz, value_type=float),
+                "target_qw": ParameterValue(target_qw, value_type=float),
+            },
+        ],
+    )
+
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument("input_topic", default_value="/contact_box_pose_debug"),
+            DeclareLaunchArgument("planning_group", default_value="fairino5_v6_group"),
+            DeclareLaunchArgument("target_link", default_value="wrist3_link"),
+            DeclareLaunchArgument("execute_motion", default_value="false"),
+            DeclareLaunchArgument("approach_offset_x", default_value="0.0"),
+            DeclareLaunchArgument("approach_offset_y", default_value="0.0"),
+            DeclareLaunchArgument("approach_offset_z", default_value="0.05"),
+            DeclareLaunchArgument("use_tool_offset", default_value="true"),
+            DeclareLaunchArgument("tool_offset_x", default_value="0.0"),
+            DeclareLaunchArgument("tool_offset_y", default_value="0.0"),
+            DeclareLaunchArgument("tool_offset_z", default_value="0.140"),
+            DeclareLaunchArgument("use_fixed_orientation", default_value="false"),
+            DeclareLaunchArgument("target_qx", default_value="0.0"),
+            DeclareLaunchArgument("target_qy", default_value="0.0"),
+            DeclareLaunchArgument("target_qz", default_value="0.0"),
+            DeclareLaunchArgument("target_qw", default_value="1.0"),
+            contact_box_plan_debug,
+        ]
+    )

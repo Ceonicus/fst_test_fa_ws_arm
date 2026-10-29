@@ -1,0 +1,314 @@
+#include <cmath>
+#include <functional>
+#include <memory>
+#include <string>
+
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <moveit/move_group_interface/move_group_interface.h>
+#include <rclcpp/rclcpp.hpp>
+
+class ContactBoxPlanDebug : public rclcpp::Node
+{
+public:
+  ContactBoxPlanDebug()
+  : Node("contact_box_plan_debug",
+         rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true))
+  {
+    declare_parameter_if_not_declared<std::string>("input_topic", "/contact_box_pose_debug");
+    declare_parameter_if_not_declared<std::string>("planning_group", "fairino5_v6_group");
+    declare_parameter_if_not_declared<std::string>("target_link", "wrist3_link");
+    declare_parameter_if_not_declared<bool>("execute_motion", false);
+    declare_parameter_if_not_declared<double>("approach_offset_x", 0.0);
+    declare_parameter_if_not_declared<double>("approach_offset_y", 0.0);
+    declare_parameter_if_not_declared<double>("approach_offset_z", 0.0);
+    declare_parameter_if_not_declared<bool>("use_tool_offset", true);
+    declare_parameter_if_not_declared<double>("tool_offset_x", 0.0);
+    declare_parameter_if_not_declared<double>("tool_offset_y", 0.0);
+    declare_parameter_if_not_declared<double>("tool_offset_z", 0.140);
+    declare_parameter_if_not_declared<bool>("use_fixed_orientation", false);
+    declare_parameter_if_not_declared<double>("target_qx", 0.0);
+    declare_parameter_if_not_declared<double>("target_qy", 0.0);
+    declare_parameter_if_not_declared<double>("target_qz", 0.0);
+    declare_parameter_if_not_declared<double>("target_qw", 1.0);
+  }
+
+  void initialize()
+  {
+    input_topic_ = get_parameter("input_topic").as_string();
+    planning_group_ = get_parameter("planning_group").as_string();
+    target_link_ = get_parameter("target_link").as_string();
+    execute_motion_ = get_parameter("execute_motion").as_bool();
+    approach_offset_x_ = get_parameter("approach_offset_x").as_double();
+    approach_offset_y_ = get_parameter("approach_offset_y").as_double();
+    approach_offset_z_ = get_parameter("approach_offset_z").as_double();
+    use_tool_offset_ = get_parameter("use_tool_offset").as_bool();
+    tool_offset_x_ = get_parameter("tool_offset_x").as_double();
+    tool_offset_y_ = get_parameter("tool_offset_y").as_double();
+    tool_offset_z_ = get_parameter("tool_offset_z").as_double();
+    use_fixed_orientation_ = get_parameter("use_fixed_orientation").as_bool();
+    target_qx_ = get_parameter("target_qx").as_double();
+    target_qy_ = get_parameter("target_qy").as_double();
+    target_qz_ = get_parameter("target_qz").as_double();
+    target_qw_ = get_parameter("target_qw").as_double();
+
+    move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
+      shared_from_this(), planning_group_);
+
+    pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
+      input_topic_, 10,
+      std::bind(&ContactBoxPlanDebug::pose_callback, this, std::placeholders::_1));
+
+    RCLCPP_WARN(
+      get_logger(),
+      "DEBUG ONLY: contact_box_plan_debug subscribes to %s and performs MoveIt planning only. "
+      "It does not publish /object_pose, does not execute trajectories, and does not command "
+      "gripper or suction hardware.",
+      input_topic_.c_str());
+    RCLCPP_INFO(
+      get_logger(),
+      "Configured planning: planning_group=%s, target_link=%s, execute_motion=%s, "
+      "approach_offset=(%.4f, %.4f, %.4f), use_tool_offset=%s, "
+      "tool_offset=(%.4f, %.4f, %.4f), use_fixed_orientation=%s, "
+      "target_orientation=(%.4f, %.4f, %.4f, %.4f)",
+      planning_group_.c_str(), target_link_.c_str(), execute_motion_ ? "true" : "false",
+      approach_offset_x_, approach_offset_y_, approach_offset_z_,
+      use_tool_offset_ ? "true" : "false", tool_offset_x_, tool_offset_y_, tool_offset_z_,
+      use_fixed_orientation_ ? "true" : "false",
+      target_qx_, target_qy_, target_qz_, target_qw_);
+    RCLCPP_INFO(
+      get_logger(),
+      "MoveIt planning frame=%s, configured end-effector link=%s",
+      move_group_->getPlanningFrame().c_str(), move_group_->getEndEffectorLink().c_str());
+
+    if (use_tool_offset_) {
+      RCLCPP_WARN(
+        get_logger(),
+        "TEMPORARY TOOL OFFSET: interpreting tool_offset as target_link->suction-contact "
+        "in the target_link frame. The default z=0.140 m comes from old reference URDF "
+        "gripper/suction links only; it is not a verified TCP. Final pickup work should "
+        "measure the real contact point and add it to the URDF as suction_tcp.");
+      if (target_link_ != "wrist3_link") {
+        RCLCPP_WARN(
+          get_logger(),
+          "use_tool_offset:=true is intended for the temporary wrist3_link->suction-contact "
+          "estimate, but target_link is %s.",
+          target_link_.c_str());
+      }
+    }
+
+    if (use_fixed_orientation_) {
+      RCLCPP_WARN(
+        get_logger(),
+        "FIXED ORIENTATION ENABLED: using target quaternion "
+        "(%.4f, %.4f, %.4f, %.4f) for the plan-only wrist target. "
+        "This should represent a suction-facing wrist3_link orientation.",
+        target_qx_, target_qy_, target_qz_, target_qw_);
+    }
+
+    if (execute_motion_) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "execute_motion:=true was requested, but trajectory execution is intentionally blocked "
+        "in this debug node. It will plan and report only.");
+    }
+  }
+
+private:
+  struct Vector3
+  {
+    double x;
+    double y;
+    double z;
+  };
+
+  template <typename ParameterT>
+  void declare_parameter_if_not_declared(const std::string & name, const ParameterT & default_value)
+  {
+    if (!has_parameter(name)) {
+      declare_parameter<ParameterT>(name, default_value);
+    }
+  }
+
+  void pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+  {
+    geometry_msgs::msg::PoseStamped desired_contact_pose = *msg;
+    if (desired_contact_pose.header.frame_id.empty()) {
+      desired_contact_pose.header.frame_id = move_group_->getPlanningFrame();
+      RCLCPP_WARN(
+        get_logger(),
+        "Received pose with empty frame_id; using MoveIt planning frame %s.",
+        desired_contact_pose.header.frame_id.c_str());
+    }
+
+    desired_contact_pose.pose.position.x += approach_offset_x_;
+    desired_contact_pose.pose.position.y += approach_offset_y_;
+    desired_contact_pose.pose.position.z += approach_offset_z_;
+
+    if (use_fixed_orientation_) {
+      desired_contact_pose.pose.orientation.x = target_qx_;
+      desired_contact_pose.pose.orientation.y = target_qy_;
+      desired_contact_pose.pose.orientation.z = target_qz_;
+      desired_contact_pose.pose.orientation.w = target_qw_;
+    }
+
+    normalize_or_reset_orientation(desired_contact_pose);
+
+    geometry_msgs::msg::PoseStamped target_pose = desired_contact_pose;
+    Vector3 rotated_tool_offset{0.0, 0.0, 0.0};
+    if (use_tool_offset_) {
+      const Vector3 tool_offset{tool_offset_x_, tool_offset_y_, tool_offset_z_};
+      rotated_tool_offset = rotate_vector_by_quaternion(target_pose.pose.orientation, tool_offset);
+      target_pose.pose.position.x -= rotated_tool_offset.x;
+      target_pose.pose.position.y -= rotated_tool_offset.y;
+      target_pose.pose.position.z -= rotated_tool_offset.z;
+    }
+    normalize_or_reset_orientation(target_pose);
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Received contact-box debug pose frame=%s stamp=%d.%09u. Desired temporary suction "
+      "contact pose after approach_offset: position=(%.4f, %.4f, %.4f), "
+      "orientation=(%.4f, %.4f, %.4f, %.4f). Planning target for %s: "
+      "position=(%.4f, %.4f, %.4f), orientation=(%.4f, %.4f, %.4f, %.4f), "
+      "use_tool_offset=%s, rotated_tool_offset=(%.4f, %.4f, %.4f).",
+      target_pose.header.frame_id.c_str(), msg->header.stamp.sec, msg->header.stamp.nanosec,
+      desired_contact_pose.pose.position.x, desired_contact_pose.pose.position.y,
+      desired_contact_pose.pose.position.z,
+      desired_contact_pose.pose.orientation.x, desired_contact_pose.pose.orientation.y,
+      desired_contact_pose.pose.orientation.z, desired_contact_pose.pose.orientation.w,
+      target_link_.c_str(),
+      target_pose.pose.position.x, target_pose.pose.position.y, target_pose.pose.position.z,
+      target_pose.pose.orientation.x, target_pose.pose.orientation.y,
+      target_pose.pose.orientation.z, target_pose.pose.orientation.w,
+      use_tool_offset_ ? "true" : "false",
+      rotated_tool_offset.x, rotated_tool_offset.y, rotated_tool_offset.z);
+
+    try {
+      move_group_->setStartStateToCurrentState();
+      move_group_->clearPoseTargets();
+      move_group_->setPoseTarget(target_pose, target_link_);
+
+      moveit::planning_interface::MoveGroupInterface::Plan plan;
+      const bool success = static_cast<bool>(move_group_->plan(plan));
+      if (success) {
+        RCLCPP_INFO(
+          get_logger(),
+          "Planning succeeded for target_link=%s. Execution remains disabled.",
+          target_link_.c_str());
+      } else {
+        RCLCPP_WARN(
+          get_logger(),
+          "Planning failed for target_link=%s. No execution attempted.",
+          target_link_.c_str());
+      }
+
+      if (execute_motion_) {
+        RCLCPP_ERROR(
+          get_logger(),
+          "Execution request blocked: contact_box_plan_debug has no execution path by design.");
+      }
+      move_group_->clearPoseTargets();
+    } catch (const std::exception & exc) {
+      RCLCPP_ERROR(get_logger(), "Exception during plan-only contact-box planning: %s", exc.what());
+    }
+  }
+
+  void normalize_or_reset_orientation(geometry_msgs::msg::PoseStamped & target_pose)
+  {
+    const auto & q = target_pose.pose.orientation;
+    const double norm = std::sqrt(
+      q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    if (!std::isfinite(norm) || norm < 1e-6) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Received invalid target orientation; using identity orientation for plan-only debug.");
+      target_pose.pose.orientation.x = 0.0;
+      target_pose.pose.orientation.y = 0.0;
+      target_pose.pose.orientation.z = 0.0;
+      target_pose.pose.orientation.w = 1.0;
+      return;
+    }
+
+    target_pose.pose.orientation.x /= norm;
+    target_pose.pose.orientation.y /= norm;
+    target_pose.pose.orientation.z /= norm;
+    target_pose.pose.orientation.w /= norm;
+  }
+
+  Vector3 rotate_vector_by_quaternion(
+    const geometry_msgs::msg::Quaternion & q,
+    const Vector3 & vector) const
+  {
+    const Vector3 q_vec{q.x, q.y, q.z};
+    const Vector3 t = scale(cross(q_vec, vector), 2.0);
+    return add(add(vector, scale(t, q.w)), cross(q_vec, t));
+  }
+
+  static Vector3 cross(const Vector3 & a, const Vector3 & b)
+  {
+    return Vector3{
+      a.y * b.z - a.z * b.y,
+      a.z * b.x - a.x * b.z,
+      a.x * b.y - a.y * b.x};
+  }
+
+  static Vector3 scale(const Vector3 & vector, const double scalar)
+  {
+    return Vector3{vector.x * scalar, vector.y * scalar, vector.z * scalar};
+  }
+
+  static Vector3 add(const Vector3 & a, const Vector3 & b)
+  {
+    return Vector3{a.x + b.x, a.y + b.y, a.z + b.z};
+  }
+
+  std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
+  std::string input_topic_;
+  std::string planning_group_;
+  std::string target_link_;
+  bool execute_motion_{false};
+  double approach_offset_x_{0.0};
+  double approach_offset_y_{0.0};
+  double approach_offset_z_{0.0};
+  bool use_tool_offset_{true};
+  double tool_offset_x_{0.0};
+  double tool_offset_y_{0.0};
+  double tool_offset_z_{0.140};
+  bool use_fixed_orientation_{false};
+  double target_qx_{0.0};
+  double target_qy_{0.0};
+  double target_qz_{0.0};
+  double target_qw_{1.0};
+};
+
+int main(int argc, char * argv[])
+{
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared<ContactBoxPlanDebug>();
+  try {
+    node->initialize();
+  } catch (const std::exception & exc) {
+    RCLCPP_ERROR(
+      node->get_logger(),
+      "Failed to initialize MoveIt plan-only node: %s. "
+      "Use `ros2 launch moveit_move contact_box_plan_debug.launch.py` so this node "
+      "receives robot_description, robot_description_semantic, kinematics, and planning "
+      "pipeline parameters. Standalone `ros2 run` does not inherit parameters from /move_group.",
+      exc.what());
+    rclcpp::shutdown();
+    return 1;
+  }
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(node);
+  try {
+    executor.spin();
+  } catch (const std::exception & exc) {
+    RCLCPP_ERROR(node->get_logger(), "Exception during spin: %s", exc.what());
+  }
+
+  executor.cancel();
+  rclcpp::shutdown();
+  return 0;
+}

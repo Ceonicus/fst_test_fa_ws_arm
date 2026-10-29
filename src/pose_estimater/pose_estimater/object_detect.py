@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+
+import os
+from typing import Optional, Tuple
+
+import cv2
+import rclpy
+from cv_bridge import CvBridge
+from geometry_msgs.msg import Point
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from ultralytics import YOLO
+
+
+class ObjectDetectNode(Node):
+    """
+    YOLO detection/pose node.
+
+    For this contact-box suction project, the safe behavior is:
+      YOLO pose model -> suction_target keypoint -> /pixel_coordinates
+
+    It intentionally avoids falling back to bounding-box center by default,
+    because box-center depth previously caused unsafe background-depth targets.
+    """
+
+    def __init__(self):
+        super().__init__("object_detect")
+
+        self.declare_parameter("image_topic", "/camera/camera/color/image_raw")
+        self.declare_parameter("pixel_topic", "/pixel_coordinates")
+        self.declare_parameter("annotated_topic", "/yolo/detections")
+
+        self.declare_parameter(
+            "model_path",
+            "/home/jetson-nano/Desktop/fst_test_fa_ws_arm/models/contact_box_suction_pose.engine",
+        )
+        self.declare_parameter("model_task", "pose")
+
+        self.declare_parameter("target_class", "contact_box")
+        self.declare_parameter("target_class_id", -1)
+        self.declare_parameter("confidence_threshold", 0.80)
+
+        self.declare_parameter("use_keypoint", True)
+        self.declare_parameter("keypoint_index", 0)
+        self.declare_parameter("require_keypoint", True)
+        self.declare_parameter("min_keypoint_confidence", 0.30)
+
+        self.declare_parameter("publish_annotated", True)
+        self.declare_parameter("display_window", False)
+        self.declare_parameter("window_name", "YOLO suction target")
+        self.declare_parameter("display_scale", 1.0)
+
+        self.image_topic = self.get_parameter("image_topic").value
+        self.pixel_topic = self.get_parameter("pixel_topic").value
+        self.annotated_topic = self.get_parameter("annotated_topic").value
+
+        self.model_path = self.get_parameter("model_path").value
+        self.model_task = self.get_parameter("model_task").value
+
+        self.target_class = self.get_parameter("target_class").value
+        self.target_class_id = int(self.get_parameter("target_class_id").value)
+        self.confidence_threshold = float(self.get_parameter("confidence_threshold").value)
+
+        self.use_keypoint = bool(self.get_parameter("use_keypoint").value)
+        self.keypoint_index = int(self.get_parameter("keypoint_index").value)
+        self.require_keypoint = bool(self.get_parameter("require_keypoint").value)
+        self.min_keypoint_confidence = float(self.get_parameter("min_keypoint_confidence").value)
+
+        self.publish_annotated = bool(self.get_parameter("publish_annotated").value)
+        self.display_window = bool(self.get_parameter("display_window").value)
+        self.window_name = self.get_parameter("window_name").value
+        self.display_scale = float(self.get_parameter("display_scale").value)
+
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(f"YOLO model not found: {self.model_path}")
+
+        self.get_logger().info(f"Loading YOLO model: {self.model_path}")
+        self.get_logger().info(f"Using explicit YOLO task: {self.model_task}")
+
+        self.model = YOLO(self.model_path, task=self.model_task)
+
+        self.get_logger().info(f"Model names: {self.model.names}")
+        self.get_logger().info(
+            f"Publishing suction target keypoint to {self.pixel_topic}. "
+            f"use_keypoint={self.use_keypoint}, "
+            f"keypoint_index={self.keypoint_index}, "
+            f"require_keypoint={self.require_keypoint}, "
+            f"conf={self.confidence_threshold:.2f}"
+        )
+
+        self.bridge = CvBridge()
+
+        self.pixel_publisher = self.create_publisher(Point, self.pixel_topic, 10)
+        self.annotated_publisher = self.create_publisher(Image, self.annotated_topic, 10)
+
+        self.image_subscription = self.create_subscription(
+            Image,
+            self.image_topic,
+            self.image_callback,
+            10,
+        )
+
+    def class_matches(self, class_id: int) -> bool:
+        if self.target_class_id >= 0:
+            return class_id == self.target_class_id
+
+        class_name = self.model.names.get(class_id, str(class_id))
+        return class_name == self.target_class
+
+    def choose_best_detection(self, result) -> Optional[int]:
+        if result.boxes is None or len(result.boxes) == 0:
+            return None
+
+        best_index = None
+        best_confidence = -1.0
+
+        for index, box in enumerate(result.boxes):
+            class_id = int(box.cls.item())
+            confidence = float(box.conf.item())
+
+            if confidence < self.confidence_threshold:
+                continue
+
+            if not self.class_matches(class_id):
+                continue
+
+            if confidence > best_confidence:
+                best_confidence = confidence
+                best_index = index
+
+        return best_index
+
+    def get_keypoint_pixel(self, result, detection_index: int) -> Optional[Tuple[float, float, Optional[float]]]:
+        if result.keypoints is None:
+            return None
+
+        keypoints_xy = result.keypoints.xy
+
+        if keypoints_xy is None:
+            return None
+
+        if detection_index >= keypoints_xy.shape[0]:
+            return None
+
+        if self.keypoint_index >= keypoints_xy.shape[1]:
+            return None
+
+        keypoint_xy = keypoints_xy[detection_index, self.keypoint_index]
+        keypoint_x = float(keypoint_xy[0].item())
+        keypoint_y = float(keypoint_xy[1].item())
+
+        keypoint_confidence = None
+
+        if result.keypoints.conf is not None:
+            keypoint_confidence = float(
+                result.keypoints.conf[detection_index, self.keypoint_index].item()
+            )
+
+            if keypoint_confidence < self.min_keypoint_confidence:
+                self.get_logger().warn(
+                    f"Rejected keypoint due to low keypoint confidence: "
+                    f"{keypoint_confidence:.3f} < {self.min_keypoint_confidence:.3f}"
+                )
+                return None
+
+        if keypoint_x <= 0.0 and keypoint_y <= 0.0:
+            return None
+
+        return keypoint_x, keypoint_y, keypoint_confidence
+
+    def get_box_center_pixel(self, result, detection_index: int) -> Tuple[float, float]:
+        box_xyxy = result.boxes.xyxy[detection_index]
+        x1 = float(box_xyxy[0].item())
+        y1 = float(box_xyxy[1].item())
+        x2 = float(box_xyxy[2].item())
+        y2 = float(box_xyxy[3].item())
+
+        return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+    def publish_pixel(self, x: float, y: float):
+        pixel_message = Point()
+        pixel_message.x = float(x)
+        pixel_message.y = float(y)
+        pixel_message.z = 0.0
+        self.pixel_publisher.publish(pixel_message)
+
+    def publish_or_display_annotated(self, result, image_msg: Image):
+        annotated_image = result.plot()
+
+        if self.publish_annotated:
+            annotated_msg = self.bridge.cv2_to_imgmsg(annotated_image, encoding="bgr8")
+            annotated_msg.header = image_msg.header
+            self.annotated_publisher.publish(annotated_msg)
+
+        if self.display_window:
+            display_image = annotated_image
+
+            if self.display_scale > 0.0 and abs(self.display_scale - 1.0) > 1e-6:
+                display_image = cv2.resize(
+                    annotated_image,
+                    None,
+                    fx=self.display_scale,
+                    fy=self.display_scale,
+                    interpolation=cv2.INTER_AREA,
+                )
+
+            cv2.imshow(self.window_name, display_image)
+            cv2.waitKey(1)
+
+    def image_callback(self, image_msg: Image):
+        try:
+            bgr_image = self.bridge.imgmsg_to_cv2(image_msg, desired_encoding="bgr8")
+        except Exception as error:
+            self.get_logger().error(f"Failed to convert image: {error}")
+            return
+
+        try:
+            results = self.model(
+                bgr_image,
+                imgsz=960,
+                conf=self.confidence_threshold,
+                verbose=False,
+            )
+        except Exception as error:
+            self.get_logger().error(f"YOLO inference failed: {error}")
+            return
+
+        if not results:
+            return
+
+        result = results[0]
+        detection_index = self.choose_best_detection(result)
+
+        if detection_index is None:
+            self.publish_or_display_annotated(result, image_msg)
+            return
+
+        class_id = int(result.boxes[detection_index].cls.item())
+        confidence = float(result.boxes[detection_index].conf.item())
+        class_name = self.model.names.get(class_id, str(class_id))
+
+        selected_x = None
+        selected_y = None
+        keypoint_confidence = None
+        source = "unknown"
+
+        if self.use_keypoint:
+            keypoint_result = self.get_keypoint_pixel(result, detection_index)
+
+            if keypoint_result is not None:
+                selected_x, selected_y, keypoint_confidence = keypoint_result
+                source = "suction_target_keypoint"
+            elif self.require_keypoint:
+                self.get_logger().warn(
+                    f"Detected {class_name} with box confidence {confidence:.3f}, "
+                    f"but no valid suction_target keypoint. "
+                    f"Skipping publish to avoid unsafe box-center fallback."
+                )
+                self.publish_or_display_annotated(result, image_msg)
+                return
+
+        if selected_x is None or selected_y is None:
+            selected_x, selected_y = self.get_box_center_pixel(result, detection_index)
+            source = "box_center_fallback"
+
+        self.publish_pixel(selected_x, selected_y)
+
+        if keypoint_confidence is None:
+            self.get_logger().info(
+                f"{class_name} {confidence:.3f} -> published "
+                f"{source} pixel=({selected_x:.1f}, {selected_y:.1f})"
+            )
+        else:
+            self.get_logger().info(
+                f"{class_name} box_conf={confidence:.3f} "
+                f"keypoint_conf={keypoint_confidence:.3f} -> published "
+                f"{source} pixel=({selected_x:.1f}, {selected_y:.1f})"
+            )
+
+        self.publish_or_display_annotated(result, image_msg)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = ObjectDetectNode()
+
+    try:
+        rclpy.spin(node)
+    finally:
+        if node.display_window:
+            cv2.destroyAllWindows()
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

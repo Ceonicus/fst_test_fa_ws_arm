@@ -1,0 +1,77 @@
+
+Calibration file:
+camera_apriltag_test/results/fairino_realsense_wrist2_easy_handeye2_second_try.calib
+
+Saved transform from file:
+t = [-0.035353, +0.097810, +0.213138]
+q = [-0.715593, +0.009539, -0.000269, +0.698453]
+
+Inverse of saved transform:
+t = [+0.039476, +0.214949, -0.092102]
+q = [+0.715593, -0.009539, +0.000269, +0.698453]
+
+================================================================================
+TEST A: using saved transform directly as wrist2_link -> camera_color_optical_frame
+================================================================================
+sample 00: x=+0.4522, y=-0.6826, z=+0.3286, error=37.4 mm
+sample 01: x=+0.5896, y=-0.8318, z=+0.2940, error=168.6 mm
+sample 02: x=+0.4854, y=-0.7170, z=+0.3171, error=12.2 mm
+sample 03: x=+0.4540, y=-0.6802, z=+0.3190, error=36.8 mm
+sample 04: x=+0.4491, y=-0.6785, z=+0.3116, error=42.4 mm
+sample 05: x=+0.4727, y=-0.7083, z=+0.2730, error=47.7 mm
+sample 06: x=+0.4405, y=-0.6688, z=+0.3230, error=54.5 mm
+sample 07: x=+0.4883, y=-0.7302, z=+0.3176, error=25.0 mm
+sample 08: x=+0.5136, y=-0.7621, z=+0.3498, error=71.3 mm
+sample 09: x=+0.4118, y=-0.6307, z=+0.3497, error=106.0 mm
+sample 10: x=+0.4461, y=-0.6892, z=+0.3312, error=39.2 mm
+sample 11: x=+0.4289, y=-0.6209, z=+0.3457, error=102.9 mm
+sample 12: x=+0.4535, y=-0.6755, z=+0.3021, error=44.5 mm
+sample 13: x=+0.4531, y=-0.6892, z=+0.3592, error=50.2 mm
+sample 14: x=+0.6509, y=-0.8392, z=+0.2811, error=220.1 mm
+
+Summary:
+sample count: 15
+mean position: x=+0.4793 m, y=-0.7069 m, z=+0.3202 m
+
+Axis standard deviation:
+x std: 63.4 mm
+y std: 62.8 mm
+z std: 25.3 mm
+
+3D error from mean:
+mean error: 70.6 mm
+max error:  220.1 mm
+Verdict: POOR
+
+================================================================================
+TEST B: using INVERSE saved transform as wrist2_link -> camera_color_optical_frame
+================================================================================
+sample 00: x=-0.0414, y=-0.1570, z=+0.1551, error=262.0 mm
+sample 01: x=-0.1482, y=+0.0171, z=+0.1792, error=107.9 mm
+sample 02: x=-0.2786, y=+0.1152, z=+0.2749, error=127.1 mm
+sample 03: x=-0.1852, y=+0.0204, z=+0.3798, error=111.5 mm
+sample 04: x=-0.1703, y=-0.0286, z=+0.4060, error=145.5 mm
+sample 05: x=-0.1970, y=+0.0012, z=+0.4426, error=172.6 mm
+sample 06: x=-0.2074, y=+0.0157, z=+0.6270, error=356.4 mm
+sample 07: x=-0.2566, y=+0.0762, z=+0.6286, error=367.4 mm
+sample 08: x=-0.2203, y=+0.0255, z=-0.0285, error=299.7 mm
+sample 09: x=-0.1128, y=-0.1009, z=-0.0203, error=325.2 mm
+sample 10: x=-0.1129, y=+0.1318, z=+0.2301, error=157.0 mm
+sample 11: x=-0.0669, y=+0.0787, z=+0.2146, error=163.8 mm
+sample 12: x=-0.2403, y=-0.1222, z=+0.2108, error=150.4 mm
+sample 13: x=-0.4863, y=+0.1536, z=+0.1522, error=336.3 mm
+sample 14: x=-0.3567, y=-0.0550, z=+0.2063, error=177.3 mm
+
+Summary:
+sample count: 15
+mean position: x=-0.2054 m, y=+0.0114 m, z=+0.2706 m
+
+Axis standard deviation:
+x std: 113.2 mm
+y std: 92.4 mm
+z std: 195.9 mm
+
+3D error from mean:
+mean error: 217.4 mm
+max error:  367.4 mm
+Verdict: POOR

@@ -1,0 +1,44 @@
+
+Calibration used:
+name: fairino_realsense_wrist2
+robot_base_frame: base_link
+robot_effector_frame: wrist2_link
+tracking_base_frame: camera_color_optical_frame
+tracking_marker_frame: tag36h11_0
+
+Using calibrated wrist2_link -> camera_color_optical_frame:
+translation: x=-0.035353, y=+0.097810, z=+0.213138
+quaternion:  x=-0.715593, y=+0.009539, z=-0.000269, w=+0.698453
+
+Per-sample calibrated base_link -> tag36h11_0 position error from mean:
+
+sample 00: x=+0.4528, y=-0.6818, z=+0.3296, error=4.4 mm
+sample 01: x=+0.4219, y=-0.6782, z=+0.3498, error=33.0 mm
+sample 02: x=+0.4292, y=-0.7038, z=+0.3635, error=43.2 mm
+sample 03: x=+0.4531, y=-0.6812, z=+0.3292, error=5.0 mm
+sample 04: x=+0.4369, y=-0.7046, z=+0.3511, error=31.8 mm
+sample 05: x=+0.4532, y=-0.6821, z=+0.3296, error=4.7 mm
+sample 06: x=+0.4614, y=-0.6527, z=+0.3156, error=36.3 mm
+sample 07: x=+0.4525, y=-0.6832, z=+0.3295, error=4.0 mm
+sample 08: x=+0.4522, y=-0.6825, z=+0.3291, error=4.0 mm
+sample 09: x=+0.4524, y=-0.6827, z=+0.3299, error=3.8 mm
+sample 10: x=+0.4397, y=-0.6482, z=+0.3338, error=36.0 mm
+sample 11: x=+0.4520, y=-0.6822, z=+0.3296, error=3.6 mm
+sample 12: x=+0.4706, y=-0.6995, z=+0.2871, error=51.9 mm
+sample 13: x=+0.4525, y=-0.6821, z=+0.3300, error=4.0 mm
+sample 14: x=+0.4525, y=-0.6991, z=+0.3310, error=16.5 mm
+
+Summary:
+sample count: 15
+mean position: x=+0.4489 m, y=-0.6829 m, z=+0.3312 m
+
+Axis standard deviation:
+x std: 12.2 mm
+y std: 16.0 mm
+z std: 16.9 mm
+
+3D error from mean:
+mean error: 18.8 mm
+max error:  51.9 mm
+
+Verdict: USABLE / CHECK

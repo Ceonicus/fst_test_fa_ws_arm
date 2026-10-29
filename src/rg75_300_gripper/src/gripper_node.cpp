@@ -1,0 +1,239 @@
+#include "rclcpp/rclcpp.hpp"
+#include "rg75_300_gripper/msg/gripper_state.hpp"
+#include "rg75_300_gripper/srv/gripper_command.hpp"
+#include "robot.h"   // Fairino SDK
+#include "gripper_config.hpp"
+
+using std::placeholders::_1;
+using std::placeholders::_2;
+
+// For testing purposes:
+// int pos   = 10;
+// int vel   = 60;      // fixed default speed
+// int force = 50;
+// int max_time  = 5000;
+// uint8_t block = 1;   // blocking
+// int type      = 0;   // parallel gripper
+// double rotNum = 0;
+// int rotVel    = 0;
+// int rotTorque = 0;
+
+class GripperNode : public rclcpp::Node
+{
+public:
+  GripperNode() : Node("gripper_node"), position_(0.0), force_(0.0), activated_(0)
+  {
+    rerun();
+
+    //RCLCPP_INFO(this->get_logger(), "Retrying gripper activation...");
+
+    //create ROS2 interfaces (gripper state publisher, gripper command service)
+    state_pub_ = this->create_publisher<rg75_300_gripper::msg::GripperState>("gripper_state", 10);
+    cmd_srv_ = this->create_service<rg75_300_gripper::srv::GripperCommand>(
+      "gripper_command", std::bind(&GripperNode::handle_command, this, _1, _2));
+
+    timer_ = this->create_wall_timer(
+      std::chrono::milliseconds(500),
+      std::bind(&GripperNode::publish_state, this));
+  }
+
+  ~GripperNode()
+  {
+    robot_.CloseRPC();
+  }
+
+private:
+  // void wait_for_activation()
+  // {
+  //   uint16_t fault = 0;
+  //   uint16_t status = 0;
+  //   bool activated = false;
+
+  //   for (int i = 0; i < 50; i++) {  // wait up to 5s
+  //     robot_.GetGripperActivateStatus(&fault, &status);
+  //     if ((status & 0x1) != 0) {
+  //       RCLCPP_INFO(this->get_logger(), "✅ Gripper activated.");
+  //       activated = true;
+  //       break;
+  //     }
+  //     rclcpp::sleep_for(std::chrono::milliseconds(100));
+  //   }
+
+  //   if (!activated) {
+  //     RCLCPP_ERROR(this->get_logger(), "❌ Gripper activation timeout.");
+  //   }
+  // }
+
+  #include <vector>
+
+  std::vector<int> detect_gripper_indices(FRRobot &robot) {
+      uint16_t fault = 0, status = 0;
+      int ret = robot.GetGripperActivateStatus(&fault, &status);
+      if (ret != 0) {
+          return {};  // empty if error
+      }
+
+      std::vector<int> active_indices;
+      for (int i = 0; i < 8; i++) {  // only 0–7 valid
+          if (status & (1 << i)) {
+              active_indices.push_back(i);
+          }
+      }
+      return active_indices;
+  }
+
+  void rerun(){
+    ROBOT_STATE_PKG pkg = {};
+    // keep on trying to connect
+    int ret = robot_.RPC(ROBOT_IP);
+    robot_.SetReConnectParam(true, 30000, 500);
+
+    //ret = robot_.RobotEnable(1);
+    // if(ret == 0) RCLCPP_INFO(this->get_logger(), "Robot enabled.");
+    // else RCLCPP_ERROR(this->get_logger(), "Failed to enable robot (err=%d)", ret);
+    rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+    ret = robot_.SetGripperConfig(GRIPPER_COMPANY, GRIPPER_DEVICE, GRIPPER_SOFTWARE, GRIPPER_BUS);
+    RCLCPP_INFO(this->get_logger(), "SetGripperConfig ret=%d", ret);
+    rclcpp::sleep_for(std::chrono::milliseconds(500));
+    if(ret != 0){
+      rerun();
+    }
+
+    // auto indices = detect_gripper_indices(robot_);
+    // if (indices.empty()) {
+    //     RCLCPP_ERROR(this->get_logger(), "No active gripper detected!");
+    // } else {
+    //     for (int idx : indices) {
+    //         RCLCPP_INFO(this->get_logger(), "Detected active gripper at index %d", idx);
+    //     }
+    // }
+
+    //reset the gripper first (index, activate (0 - deactivate, 1 - activate))
+    ret = robot_.ActGripper(GRIPPER_INDEX, 0);
+    RCLCPP_INFO(this->get_logger(), "Reset gripper ret=%d", ret);
+    rclcpp::sleep_for(std::chrono::seconds(3));
+
+    
+    //activate the gripper
+    ret = robot_.ActGripper(GRIPPER_INDEX, 1);
+
+    if(ret == 0){
+      RCLCPP_INFO(this->get_logger(), "Gripper activated.");
+      activated_ = 1;
+    }
+    else RCLCPP_ERROR(this->get_logger(), "Failed to activate gripper (err=%d)", ret);
+
+    rclcpp::sleep_for(std::chrono::seconds(3));
+  
+    //MoveGripper(int index, int pos, int vel, int force, int max_time, uint8_t block, int type, double rotNum, int rotVel, int rotTorque);
+    ret = robot_.MoveGripper(GRIPPER_INDEX, DEFAULT_POSITION, DEFAULT_VELOCITY, DEFAULT_FORCE, DEFAULT_MAX_TIME, 
+                              DEFAULT_BLOCK, DEFAULT_TYPE, DEFAULT_ROT_NUM, DEFAULT_ROT_VEL, DEFAULT_ROT_TORQUE);
+
+    if(ret == 0) RCLCPP_INFO(this->get_logger(), "Initial gripper move done.");
+    else{
+      RCLCPP_ERROR(this->get_logger(), "Initial MoveGripper failed (err=%d)", ret);
+      rerun();
+    }
+
+    //not crucial, but can comment out bottom portion in the future, since rerun() prints this twice due to two separate threads.
+    uint16_t fault = 0;
+    uint16_t status = 0;
+    ret = robot_.GetGripperActivateStatus(&fault, &status);
+
+    RCLCPP_INFO(this->get_logger(), "Gripper return status: %d", ret);
+
+    char version[64] = "";
+    robot_.GetSDKVersion(version);
+    RCLCPP_INFO(this->get_logger(), "SDK version: %s", version);
+  }
+
+  void publish_state()
+  {
+    uint16_t fault = 0;
+    uint8_t pos = 0;
+    robot_.GetGripperCurPosition(&fault, &pos);
+
+    auto msg = rg75_300_gripper::msg::GripperState();
+    msg.is_open = (pos > 50);   // heuristic
+    msg.position = pos / 100.0;
+    msg.force = force_;
+    msg.activated = activated_;
+
+    state_pub_->publish(msg);
+  }
+
+  void handle_command(const std::shared_ptr<rg75_300_gripper::srv::GripperCommand::Request> request,
+  std::shared_ptr<rg75_300_gripper::srv::GripperCommand::Response> response)
+  {
+      int ret;
+
+      // --- Optional Activation / Deactivation ---
+      if (request->activated == 1 && !activated_) {
+          ret = robot_.ActGripper(GRIPPER_INDEX, 1);
+          if (ret == 0) {
+              activated_ = true;
+              RCLCPP_INFO(this->get_logger(), "Gripper activated.");
+          } else {
+              response->success = false;
+              response->message = "Failed to activate gripper (err=" + std::to_string(ret) + ")";
+              return;
+          }
+      } else if (request->activated == 0 && activated_) {
+          ret = robot_.ActGripper(GRIPPER_INDEX, 0);
+          if (ret == 0) {
+              activated_ = false;
+              RCLCPP_INFO(this->get_logger(), "Gripper deactivated.");
+          } else {
+              response->success = false;
+              response->message = "Failed to deactivate gripper (err=" + std::to_string(ret) + ")";
+              return;
+          }
+      }
+      // activated == -1 → no change, skip activation logic
+
+      // --- Move Gripper ---
+      int pos   = std::clamp<int>(static_cast<int>(request->position), 0, 100);
+      int force = std::clamp<int>(static_cast<int>(request->force), 0, 100);
+      int vel   = DEFAULT_VELOCITY;
+      int max_time  = DEFAULT_MAX_TIME;
+      uint8_t block = DEFAULT_BLOCK;
+      int type      = DEFAULT_TYPE;
+      double rotNum = DEFAULT_ROT_NUM;
+      int rotVel    = DEFAULT_ROT_VEL;
+      int rotTorque = DEFAULT_ROT_TORQUE;
+
+      ret = robot_.MoveGripper(GRIPPER_INDEX, pos, vel, force, max_time, block, type, rotNum, rotVel, rotTorque);
+
+      if (ret == 0) {
+          position_ = request->position;
+          force_    = request->force;
+          response->success = true;
+          response->message = "Gripper move executed";
+          RCLCPP_INFO(this->get_logger(), "Gripper move OK -> pos=%d%% vel=%d%% force=%d%%", pos, vel, force);
+      } else {
+          response->success = false;
+          response->message = "MoveGripper failed (err=" + std::to_string(ret) + ")";
+          RCLCPP_ERROR(this->get_logger(), "MoveGripper failed (err=%d) with pos=%d vel=%d force=%d",
+                      ret, pos, vel, force);
+      }
+  }
+
+  rclcpp::Publisher<rg75_300_gripper::msg::GripperState>::SharedPtr state_pub_;
+  rclcpp::Service<rg75_300_gripper::srv::GripperCommand>::SharedPtr cmd_srv_;
+  //rclcpp::Service<rg75_300_gripper::srv::GripperActivation>::SharedPtr activation_srv_;
+  rclcpp::TimerBase::SharedPtr timer_;
+
+  FRRobot robot_;
+  float position_;
+  float force_;
+  bool activated_;
+};
+
+int main(int argc, char **argv)
+{
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<GripperNode>());
+  rclcpp::shutdown();
+  return 0;
+}

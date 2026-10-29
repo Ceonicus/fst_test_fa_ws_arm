@@ -1,0 +1,382 @@
+{
+  "pose_name": "camera_left",
+  "pose_index": 3,
+  "timestamp": {
+    "unix_seconds": 1782716150.7714636,
+    "iso8601_local": "2026-06-29T14:55:50"
+  },
+  "execute": true,
+  "step_mm": 10.0,
+  "settle_seconds": 2.0,
+  "group_name": "fairino5_v6_group",
+  "base_frame": "base_link",
+  "mount_link": "wrist2_link",
+  "mount_link_compensation_active": true,
+  "control_link": "wrist3_link",
+  "camera_frame": "camera_color_optical_frame",
+  "lock_joints": [],
+  "joint_lock_tolerance_deg": 0.1,
+  "locked_joint_positions": [],
+  "path_constraints": null,
+  "requested_camera_offset": {
+    "meters": {
+      "x": -0.01,
+      "y": 0.0,
+      "z": 0.0
+    },
+    "millimeters": {
+      "x": -10.0,
+      "y": 0.0,
+      "z": 0.0
+    }
+  },
+  "target_camera_pose": {
+    "frame_id": "base_link",
+    "position": {
+      "x": -0.1143412694542093,
+      "y": -0.3112173573955454,
+      "z": 0.4779266507645865
+    },
+    "orientation": {
+      "x": 0.0920075645326608,
+      "y": 0.9954202054110246,
+      "z": -0.008149639461713603,
+      "w": -0.024633434695269418
+    }
+  },
+  "target_mount_pose": {
+    "frame_id": "base_link",
+    "position": {
+      "x": -0.10915969403519103,
+      "y": -0.09161222857646054,
+      "z": 0.5673193165546022
+    },
+    "orientation": {
+      "x": -0.046825455552307486,
+      "y": -0.6896324208808429,
+      "z": 0.7188916239362235,
+      "w": 0.07354817344221566
+    }
+  },
+  "target_control_pose": {
+    "frame_id": "base_link",
+    "position": {
+      "x": -0.12637395510310873,
+      "y": -0.19204694560134442,
+      "z": 0.5718510747142009
+    },
+    "orientation": {
+      "x": 0.720113552262355,
+      "y": 0.6932903079776269,
+      "z": -0.028012019676835254,
+      "w": -0.0005894624708739915
+    }
+  },
+  "camera_topics": {
+    "rgb": "/camera/camera/color/image_raw",
+    "depth": "/camera/camera/aligned_depth_to_color/image_raw",
+    "camera_info": "/camera/camera/color/camera_info",
+    "apriltag_detections": "/detections"
+  },
+  "settle_spin_enabled": true,
+  "apriltag_max_age_sec": 0.5,
+  "apriltag_frame": "tag36h11_0",
+  "apriltag_wait_timeout_sec": 3.0,
+  "apriltag_wait_succeeded": true,
+  "apriltag_wait_reason": "fresh_detection",
+  "apriltag_detection_available": true,
+  "apriltag_detection_fresh": true,
+  "apriltag_detection_age_sec": 0.07673811912536621,
+  "apriltag_detections": 1,
+  "apriltag_first_detection": {
+    "family": "tag36h11",
+    "id": 0,
+    "hamming": 0,
+    "decision_margin": 106.68616485595703,
+    "center_field": "centre",
+    "center": {
+      "x": 443.2210275858751,
+      "y": 226.6456609957224
+    },
+    "corners": [
+      {
+        "x": 452.0757446289062,
+        "y": 297.1998596191407
+      },
+      {
+        "x": 513.1840209960939,
+        "y": 217.97204589843753
+      },
+      {
+        "x": 434.378631591797,
+        "y": 156.18963623046875
+      },
+      {
+        "x": 372.56411743164057,
+        "y": 235.4053039550781
+      }
+    ]
+  },
+  "camera_to_tag": {
+    "source": "tf",
+    "parent_frame": "camera_color_optical_frame",
+    "child_frame": "tag36h11_0",
+    "lookup_success": true,
+    "lookup_fresh": true,
+    "lookup_age_sec": 0.07698774337768555,
+    "error": null,
+    "stamp": {
+      "sec": 1782716150,
+      "nanosec": 654507324
+    },
+    "translation": {
+      "x": 0.009187267720859454,
+      "y": -0.015622920404159293,
+      "z": 0.4828785190817563
+    },
+    "rotation": {
+      "x": 0.89798646597663,
+      "y": -0.439409767329045,
+      "z": 0.022455588010278558,
+      "w": -0.005925357858392145
+    }
+  },
+  "joint_states": {
+    "stamp": {
+      "sec": 1782716150,
+      "nanosec": 722687833
+    },
+    "name": [
+      "j1",
+      "j2",
+      "j4",
+      "j5",
+      "j3",
+      "j6"
+    ],
+    "position": [
+      -1.6926186361189361,
+      -0.853698258503893,
+      -1.7713604532273635,
+      1.5345730749120747,
+      -2.0446179584585247,
+      1.4861425583826025
+    ],
+    "velocity": [
+      NaN,
+      NaN,
+      NaN,
+      NaN,
+      NaN,
+      NaN
+    ],
+    "effort": [
+      NaN,
+      NaN,
+      NaN,
+      NaN,
+      NaN,
+      NaN
+    ]
+  },
+  "tf_snapshots": {
+    "base_to_wrist2": {
+      "target_frame": "base_link",
+      "source_frame": "wrist2_link",
+      "stamp": {
+        "sec": 1782716150,
+        "nanosec": 722687833
+      },
+      "translation": {
+        "x": -0.11399135596358718,
+        "y": -0.09088965518455515,
+        "z": 0.5674804846430065
+      },
+      "rotation": {
+        "x": -0.02960162643064588,
+        "y": -0.6912120380193925,
+        "z": 0.7197924020275911,
+        "w": 0.05699614191407309
+      }
+    },
+    "base_to_wrist3": {
+      "target_frame": "base_link",
+      "source_frame": "wrist3_link",
+      "stamp": {
+        "sec": 1782716150,
+        "nanosec": 722687833
+      },
+      "translation": {
+        "x": -0.12637485878522497,
+        "y": -0.1920414220942643,
+        "z": 0.5718358157337933
+      },
+      "rotation": {
+        "x": 0.7201098572992752,
+        "y": 0.6932951921772077,
+        "z": -0.027986036490513514,
+        "w": -0.0005930311439631083
+      }
+    },
+    "base_to_camera": {
+      "target_frame": "base_link",
+      "source_frame": "camera_color_optical_frame",
+      "stamp": {
+        "sec": 1782716150,
+        "nanosec": 722687833
+      },
+      "translation": {
+        "x": -0.10882957351581715,
+        "y": -0.31031488668725166,
+        "z": 0.477646004589604
+      },
+      "rotation": {
+        "x": 0.06814119040448571,
+        "y": 0.9973213326550647,
+        "z": -0.007817170557795043,
+        "w": -0.02541317465126723
+      }
+    },
+    "base_to_control": {
+      "target_frame": "base_link",
+      "source_frame": "wrist3_link",
+      "stamp": {
+        "sec": 1782716150,
+        "nanosec": 722687833
+      },
+      "translation": {
+        "x": -0.12637485878522497,
+        "y": -0.1920414220942643,
+        "z": 0.5718358157337933
+      },
+      "rotation": {
+        "x": 0.7201098572992752,
+        "y": 0.6932951921772077,
+        "z": -0.027986036490513514,
+        "w": -0.0005930311439631083
+      }
+    },
+    "base_to_mount": {
+      "target_frame": "base_link",
+      "source_frame": "wrist2_link",
+      "stamp": {
+        "sec": 1782716150,
+        "nanosec": 722687833
+      },
+      "translation": {
+        "x": -0.11399135596358718,
+        "y": -0.09088965518455515,
+        "z": 0.5674804846430065
+      },
+      "rotation": {
+        "x": -0.02960162643064588,
+        "y": -0.6912120380193925,
+        "z": 0.7197924020275911,
+        "w": 0.05699614191407309
+      }
+    },
+    "mount_to_camera": {
+      "target_frame": "wrist2_link",
+      "source_frame": "camera_color_optical_frame",
+      "stamp": {
+        "sec": 0,
+        "nanosec": 0
+      },
+      "translation": {
+        "x": -0.035352633085738314,
+        "y": 0.0978096074408002,
+        "z": 0.21313794136825306
+      },
+      "rotation": {
+        "x": -0.7155925088883929,
+        "y": 0.009538534188972466,
+        "z": -0.00026898389092081833,
+        "w": 0.6984527938493822
+      }
+    },
+    "mount_to_control": {
+      "target_frame": "wrist2_link",
+      "source_frame": "wrist3_link",
+      "stamp": {
+        "sec": 1782716150,
+        "nanosec": 722687833
+      },
+      "translation": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.102
+      },
+      "rotation": {
+        "x": -0.5207102553066869,
+        "y": 0.47839593081567583,
+        "z": 0.47839417357252856,
+        "w": 0.5207083426346323
+      }
+    }
+  },
+  "cartesian_path": {
+    "fraction": 1.0,
+    "error_code": 1,
+    "trajectory_points": 6,
+    "timing_added": false
+  },
+  "execute_trajectory": {
+    "accepted": true,
+    "error_code": 1,
+    "success": true
+  },
+  "output_files": {
+    "rgb": "03_camera_left_rgb.png",
+    "depth": "03_camera_left_depth.png",
+    "metadata": "03_camera_left_metadata.json"
+  },
+  "depth_encoding_note": "saved with dtype uint16",
+  "camera_info": {
+    "width": 848,
+    "height": 480,
+    "distortion_model": "plumb_bob",
+    "d": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "k": [
+      606.3141479492188,
+      0.0,
+      431.70404052734375,
+      0.0,
+      606.36083984375,
+      246.27224731445312,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "r": [
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "p": [
+      606.3141479492188,
+      0.0,
+      431.70404052734375,
+      0.0,
+      0.0,
+      606.36083984375,
+      246.27224731445312,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0
+    ]
+  }
+}

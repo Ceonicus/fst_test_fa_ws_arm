@@ -1,0 +1,126 @@
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
+
+
+def generate_launch_description():
+    execute = LaunchConfiguration("execute")
+    use_realsense = LaunchConfiguration("use_realsense")
+    save_depth = LaunchConfiguration("save_depth")
+    output_dir = LaunchConfiguration("output_dir")
+    settle_seconds = LaunchConfiguration("settle_seconds")
+    step_mm = LaunchConfiguration("step_mm")
+    group_name = LaunchConfiguration("group_name")
+    base_frame = LaunchConfiguration("base_frame")
+    mount_link = LaunchConfiguration("mount_link")
+    control_link = LaunchConfiguration("control_link")
+    camera_frame = LaunchConfiguration("camera_frame")
+    lock_joints = LaunchConfiguration("lock_joints")
+    joint_lock_tolerance_deg = LaunchConfiguration("joint_lock_tolerance_deg")
+    rgb_topic = LaunchConfiguration("rgb_topic")
+    depth_topic = LaunchConfiguration("depth_topic")
+    camera_info_topic = LaunchConfiguration("camera_info_topic")
+    cartesian_fraction_threshold = LaunchConfiguration("cartesian_fraction_threshold")
+    return_to_center = LaunchConfiguration("return_to_center")
+    apriltag_max_age_sec = LaunchConfiguration("apriltag_max_age_sec")
+    apriltag_frame = LaunchConfiguration("apriltag_frame")
+    apriltag_wait_timeout_sec = LaunchConfiguration("apriltag_wait_timeout_sec")
+
+    realsense_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution(
+                [FindPackageShare("realsense2_camera"), "launch", "rs_launch.py"]
+            )
+        ),
+        condition=IfCondition(use_realsense),
+        launch_arguments={
+            "publish_tf": "false",
+            "align_depth.enable": "true",
+            "pointcloud.enable": "true",
+        }.items(),
+    )
+
+    capture_node = Node(
+        package="camera_pose_capture",
+        executable="capture_node",
+        name="camera_pose_capture",
+        output="screen",
+        parameters=[
+            {
+                "execute": ParameterValue(execute, value_type=bool),
+                "save_depth": ParameterValue(save_depth, value_type=bool),
+                "output_dir": output_dir,
+                "settle_seconds": ParameterValue(settle_seconds, value_type=float),
+                "step_mm": ParameterValue(step_mm, value_type=float),
+                "group_name": group_name,
+                "base_frame": base_frame,
+                "mount_link": mount_link,
+                "control_link": control_link,
+                "camera_frame": camera_frame,
+                "lock_joints": lock_joints,
+                "joint_lock_tolerance_deg": ParameterValue(
+                    joint_lock_tolerance_deg,
+                    value_type=float,
+                ),
+                "rgb_topic": rgb_topic,
+                "depth_topic": depth_topic,
+                "camera_info_topic": camera_info_topic,
+                "cartesian_fraction_threshold": ParameterValue(
+                    cartesian_fraction_threshold,
+                    value_type=float,
+                ),
+                "return_to_center": ParameterValue(return_to_center, value_type=bool),
+                "apriltag_max_age_sec": ParameterValue(
+                    apriltag_max_age_sec,
+                    value_type=float,
+                ),
+                "apriltag_frame": apriltag_frame,
+                "apriltag_wait_timeout_sec": ParameterValue(
+                    apriltag_wait_timeout_sec,
+                    value_type=float,
+                ),
+            }
+        ],
+    )
+
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument("execute", default_value="false"),
+            DeclareLaunchArgument("use_realsense", default_value="false"),
+            DeclareLaunchArgument("save_depth", default_value="true"),
+            DeclareLaunchArgument(
+                "output_dir",
+                default_value="~/Desktop/fst_test_fa_ws_arm/camera_pose_captures",
+            ),
+            DeclareLaunchArgument("settle_seconds", default_value="2.0"),
+            DeclareLaunchArgument("step_mm", default_value="5.0"),
+            DeclareLaunchArgument("group_name", default_value="fairino5_v6_group"),
+            DeclareLaunchArgument("base_frame", default_value="base_link"),
+            DeclareLaunchArgument("mount_link", default_value="wrist2_link"),
+            DeclareLaunchArgument("control_link", default_value="wrist3_link"),
+            DeclareLaunchArgument("camera_frame", default_value="camera_color_optical_frame"),
+            DeclareLaunchArgument("lock_joints", default_value="['j6']"),
+            DeclareLaunchArgument("joint_lock_tolerance_deg", default_value="0.1"),
+            DeclareLaunchArgument("rgb_topic", default_value="/camera/camera/color/image_raw"),
+            DeclareLaunchArgument(
+                "depth_topic",
+                default_value="/camera/camera/aligned_depth_to_color/image_raw",
+            ),
+            DeclareLaunchArgument(
+                "camera_info_topic",
+                default_value="/camera/camera/color/camera_info",
+            ),
+            DeclareLaunchArgument("cartesian_fraction_threshold", default_value="0.99"),
+            DeclareLaunchArgument("return_to_center", default_value="true"),
+            DeclareLaunchArgument("apriltag_max_age_sec", default_value="0.5"),
+            DeclareLaunchArgument("apriltag_frame", default_value="tag36h11_0"),
+            DeclareLaunchArgument("apriltag_wait_timeout_sec", default_value="3.0"),
+            realsense_launch,
+            capture_node,
+        ]
+    )

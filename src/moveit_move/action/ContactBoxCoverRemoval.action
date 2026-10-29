@@ -1,0 +1,12 @@
+bool execute
+bool press
+bool dry_run
+---
+bool success
+string message
+string failed_stage
+float64 total_elapsed_sec
+---
+string current_stage
+float64 stage_elapsed_sec
+float64 total_elapsed_sec

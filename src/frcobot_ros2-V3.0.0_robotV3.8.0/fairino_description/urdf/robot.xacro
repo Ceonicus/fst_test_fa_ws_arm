@@ -1,0 +1,361 @@
+<?xml version="1.0" ?>
+<robot name="robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+<xacro:include filename="$(find fairino_description)/urdf/materials.xacro" />
+<xacro:include filename="$(find fairino_description)/urdf/robot.trans" />
+<link name="base_link">
+  <inertial>
+    <origin xyz="0.000318960134165666 0.268222381101784 0.00596138623518165" rpy="0 0 0"/>
+    <mass value="4.70564595000992"/>
+    <inertia ixx="0.00896516751489845" iyy="0.00896220397399733" izz="0.0131440888158387" ixy="4.46364236603196e-05" iyz="5.20939082328063e-05" ixz="5.61567585525384e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="steel_satin"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="shoulder_link_2">
+  <inertial>
+    <origin xyz="-6.607989394170022e-06 0.004096991508455827 0.07128521905724966" rpy="0 0 0"/>
+    <mass value="12.7283506221967"/>
+    <inertia ixx="0.0324904484945794" iyy="0.0315475447637031" izz="0.0237922630744243" ixy="2.9798628576367e-06" iyz="-0.000294139937735305" ixz="-3.41772232162537e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.0 -0.267926 -0.038498" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/shoulder_link_2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="steel_satin"/>
+  </visual>
+  <collision>
+    <origin xyz="0.0 -0.267926 -0.038498" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/shoulder_link_2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="upper_arm_link_2">
+  <inertial>
+    <origin xyz="-0.21250012898842047 0.07360475590734333 0.0003612005833610321" rpy="0 0 0"/>
+    <mass value="42.0398618310652"/>
+    <inertia ixx="0.0825681577757269" iyy="1.30774152325306" izz="1.3256534581236" ixy="-1.2086265029243e-05" iyz="8.31519637589651e-08" ixz="0.00211347784823412"/>
+  </inertial>
+  <visual>
+    <origin xyz="1e-06 -0.328926 -0.115498" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/upper_arm_link_2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="steel_satin"/>
+  </visual>
+  <collision>
+    <origin xyz="1e-06 -0.328926 -0.115498" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/upper_arm_link_2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="forearm_link_2">
+  <inertial>
+    <origin xyz="-0.18795274195672013 -0.05437139246485462 0.00032082476189168596" rpy="0 0 0"/>
+    <mass value="22.3137778025039"/>
+    <inertia ixx="0.0249984950748972" iyy="0.49377177426436" izz="0.497422741993761" ixy="-0.0209482427463521" iyz="3.6299527768735e-05" ixz="0.00080817149669965"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.425 -0.328922 -0.11622" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/forearm_link_2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="steel_satin"/>
+  </visual>
+  <collision>
+    <origin xyz="0.425 -0.328922 -0.11622" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/forearm_link_2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="wrist1_link_2">
+  <inertial>
+    <origin xyz="-0.0001623194796800398 0.04385616645953977 0.00357481467536655" rpy="0 0 0"/>
+    <mass value="4.73072450729012"/>
+    <inertia ixx="0.00651118171882425" iyy="0.00601458309153635" izz="0.00449640552053454" ixy="-4.45596692877359e-09" iyz="-8.73148118376299e-05" ixz="1.67633378067578e-07"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.819999 -0.320918 -0.116892" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/wrist1_link_2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="steel_satin"/>
+  </visual>
+  <collision>
+    <origin xyz="0.819999 -0.320918 -0.116892" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/wrist1_link_2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="wrist2_link_2">
+  <inertial>
+    <origin xyz="-1.1492915712452145e-06 0.0038439701529248693 0.041258475474200085" rpy="0 0 0"/>
+    <mass value="4.59893412947406"/>
+    <inertia ixx="0.00622417118545315" iyy="0.00421128358018796" izz="0.00592002627851462" ixy="-1.24489037522935e-07" iyz="-6.60474609134876e-05" ixz="-4.01152260298687e-08"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.820161 -0.369718 -0.17373" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/wrist2_link_2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="steel_satin"/>
+  </visual>
+  <collision>
+    <origin xyz="0.820161 -0.369718 -0.17373" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/wrist2_link_2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="wrist3_link_2">
+  <inertial>
+    <origin xyz="-4.027825194841128e-05 0.019599888775950813 -8.410472660033697e-05" rpy="0 0 0"/>
+    <mass value="1.53640343262628"/>
+    <inertia ixx="0.000819398114710768" iyy="0.00120600149355399" izz="0.000820555620170582" ixy="1.40371541390572e-07" iyz="1.53328688287657e-06" ixz="2.56514879226621e-07"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.820161 -0.426718 -0.21873" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/wrist3_link_2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="steel_satin"/>
+  </visual>
+  <collision>
+    <origin xyz="0.820161 -0.426718 -0.21873" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/wrist3_link_2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="Component13_1">
+  <inertial>
+    <origin xyz="0.017607979307471155 0.0154966681769797 0.000389258431443662" rpy="0 0 0"/>
+    <mass value="0.0660407714432898"/>
+    <inertia ixx="1.28482922721468e-05" iyy="4.92961852464197e-06" izz="1.31224794575613e-05" ixy="-1.83587694291276e-06" iyz="-5.9527466607194e-07" ixz="-1.26956573195253e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.858624 -0.630018 -0.24954" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/Component13_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="opaque202209238"/>
+  </visual>
+  <collision>
+    <origin xyz="0.858624 -0.630018 -0.24954" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/Component13_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="Component14_1">
+  <inertial>
+    <origin xyz="-0.01799352603252946 0.015496668168988093 0.0002780208608467727" rpy="0 0 0"/>
+    <mass value="0.0660407714432901"/>
+    <inertia ixx="1.28482914657606e-05" iyy="4.92961740998499e-06" izz="1.31224791512091e-05" ixy="1.83587748646408e-06" iyz="5.95273711167382e-07" ixz="-1.26956623060399e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.78212 -0.630018 -0.18803" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/Component14_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="opaque202209238"/>
+  </visual>
+  <collision>
+    <origin xyz="0.78212 -0.630018 -0.18803" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/Component14_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="camera_mount_v4_1">
+  <inertial>
+    <origin xyz="0.017734464321493837 0.0001058994732428542 0.06618595154703602" rpy="0 0 0"/>
+    <mass value="0.239842236423316"/>
+    <inertia ixx="0.000281628769416689" iyy="0.00042719088748755" izz="0.000146193988814353" ixy="4.51898245934501e-07" iyz="1.68648354562789e-06" ixz="-3.90991677825872e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.820161 -0.463718 -0.21873" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/camera_mount_v4_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="steel_satin"/>
+  </visual>
+  <collision>
+    <origin xyz="0.820161 -0.463718 -0.21873" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/camera_mount_v4_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="IntelRealsense_D435_Multibody_v1_1">
+  <inertial>
+    <origin xyz="-0.023195305092852392 0.011951132118777685 0.006152564065467381" rpy="0 0 0"/>
+    <mass value="0.351321315810254"/>
+    <inertia ixx="4.55703549741143e-05" iyy="0.000226860233237203" izz="0.000215797377550508" ixy="7.21040605028422e-07" iyz="-2.03920104337174e-07" ixz="4.91455636263682e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.770193 -0.465718 -0.318279" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/IntelRealsense_D435_Multibody_v1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="steel_satin"/>
+  </visual>
+  <collision>
+    <origin xyz="0.770193 -0.465718 -0.318279" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/IntelRealsense_D435_Multibody_v1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="tool_changer_v1_1">
+  <inertial>
+    <origin xyz="-0.006395180069047157 0.015999659199221916 -0.024167731977817103" rpy="0 0 0"/>
+    <mass value="0.754641971318803"/>
+    <inertia ixx="0.000249699893652949" iyy="0.000370607557518721" izz="0.000249699893637434" ixy="1.737499033538370e-14" iyz="-4.121702978920894e-15" ixz="2.831068712794149e-15"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.813902 -0.469718 -0.242933" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/tool_changer_v1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="steel_satin"/>
+  </visual>
+  <collision>
+    <origin xyz="0.813902 -0.469718 -0.242933" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/tool_changer_v1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="RG75-300-0L_1">
+  <inertial>
+    <origin xyz="-0.006346877118321048 0.06537729430616601 -0.02436151887397306" rpy="0 0 0"/>
+    <mass value="4.50915434771721"/>
+    <inertia ixx="0.00858599528108694" iyy="0.00351662774478134" izz="0.0082696569225531" ixy="1.39993206271782e-05" iyz="-2.42458742938378e-05" ixz="0.000342896569381357"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.813902 -0.501718 -0.242933" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/RG75-300-0L_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="opaque202209238"/>
+  </visual>
+  <collision>
+    <origin xyz="0.813902 -0.501718 -0.242933" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://fairino_description/meshes/robot/RG75-300-0L_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<joint name="Revolute 1" type="continuous">
+  <origin xyz="0.0 0.267926 0.038498" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="shoulder_link_2"/>
+  <axis xyz="-0.0 0.0 1.0"/>
+</joint>
+
+<joint name="Revolute 2" type="continuous">
+  <origin xyz="-1e-06 0.061 0.077" rpy="0 0 0"/>
+  <parent link="shoulder_link_2"/>
+  <child link="upper_arm_link_2"/>
+  <axis xyz="-1e-05 1.0 -0.0"/>
+</joint>
+
+<joint name="Revolute 3" type="continuous">
+  <origin xyz="-0.424999 -4e-06 0.000722" rpy="0 0 0"/>
+  <parent link="upper_arm_link_2"/>
+  <child link="forearm_link_2"/>
+  <axis xyz="-1e-05 1.0 -0.0"/>
+</joint>
+
+<joint name="Revolute 4" type="continuous">
+  <origin xyz="-0.394999 -0.008004 0.000672" rpy="0 0 0"/>
+  <parent link="forearm_link_2"/>
+  <child link="wrist1_link_2"/>
+  <axis xyz="1e-05 -1.0 0.0"/>
+</joint>
+
+<joint name="Revolute 5" type="continuous">
+  <origin xyz="-0.000162 0.0488 0.056838" rpy="0 0 0"/>
+  <parent link="wrist1_link_2"/>
+  <child link="wrist2_link_2"/>
+  <axis xyz="-4e-06 -0.0 -1.0"/>
+</joint>
+
+<joint name="Revolute 6" type="continuous">
+  <origin xyz="0.0 0.057 0.045" rpy="0 0 0"/>
+  <parent link="wrist2_link_2"/>
+  <child link="wrist3_link_2"/>
+  <axis xyz="-0.0 -1.0 0.0"/>
+</joint>
+
+<joint name="Slider 1" type="prismatic">
+  <origin xyz="-0.044722 0.1283 0.006607" rpy="0 0 0"/>
+  <parent link="RG75-300-0L_1"/>
+  <child link="Component13_1"/>
+  <axis xyz="0.499997 -0.0 -0.866027"/>
+  <limit upper="0.0" lower="0.0" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Slider 2" type="prismatic">
+  <origin xyz="0.031782 0.1283 -0.054903" rpy="0 0 0"/>
+  <parent link="RG75-300-0L_1"/>
+  <child link="Component14_1"/>
+  <axis xyz="-0.499997 0.0 0.866027"/>
+  <limit upper="0.0" lower="0.0" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Rigid 16" type="fixed">
+  <origin xyz="0.0 0.037 0.0" rpy="0 0 0"/>
+  <parent link="wrist3_link_2"/>
+  <child link="camera_mount_v4_1"/>
+</joint>
+
+<joint name="Rigid 17" type="fixed">
+  <origin xyz="0.049968 0.002 0.099549" rpy="0 0 0"/>
+  <parent link="camera_mount_v4_1"/>
+  <child link="IntelRealsense_D435_Multibody_v1_1"/>
+</joint>
+
+<joint name="Rigid 19" type="fixed">
+  <origin xyz="0.006259 0.043 0.024203" rpy="0 0 0"/>
+  <parent link="wrist3_link_2"/>
+  <child link="tool_changer_v1_1"/>
+</joint>
+
+<joint name="Rigid 20" type="fixed">
+  <origin xyz="0.0 0.032 0.0" rpy="0 0 0"/>
+  <parent link="tool_changer_v1_1"/>
+  <child link="RG75-300-0L_1"/>
+</joint>
+
+</robot>

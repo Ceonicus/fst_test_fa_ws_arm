@@ -1,0 +1,34 @@
+
+Per-sample base_link -> tag36h11_0 position error from mean:
+
+sample 00: x=+0.4531, y=-0.6824, z=+0.3287, error=13.4 mm
+sample 01: x=+0.4559, y=-0.6804, z=+0.3289, error=13.9 mm
+sample 02: x=+0.4535, y=-0.6834, z=+0.3259, error=10.8 mm
+sample 03: x=+0.4538, y=-0.6834, z=+0.3264, error=11.4 mm
+sample 04: x=+0.4572, y=-0.6901, z=+0.3255, error=14.4 mm
+sample 05: x=+0.4554, y=-0.6890, z=+0.3258, error=13.5 mm
+sample 06: x=+0.4178, y=-0.6570, z=+0.3260, error=43.7 mm
+sample 07: x=+0.4219, y=-0.6448, z=+0.3061, error=48.5 mm
+sample 08: x=+0.5171, y=-0.7160, z=+0.2692, error=86.6 mm
+sample 09: x=+0.4517, y=-0.6602, z=+0.2724, error=47.6 mm
+sample 10: x=+0.4495, y=-0.6555, z=+0.2715, error=50.8 mm
+sample 11: x=+0.4597, y=-0.6630, z=+0.3325, error=25.7 mm
+sample 12: x=+0.4529, y=-0.6847, z=+0.3089, error=7.5 mm
+sample 13: x=+0.4529, y=-0.6821, z=+0.3267, error=11.4 mm
+sample 14: x=+0.4484, y=-0.7122, z=+0.3351, error=37.3 mm
+sample 15: x=+0.4459, y=-0.7086, z=+0.3361, error=35.4 mm
+
+Summary:
+sample count: 16
+mean position: x=+0.4529 m, y=-0.6808 m, z=+0.3154 m
+
+Axis standard deviation:
+x std: 20.8 mm
+y std: 20.7 mm
+z std: 23.4 mm
+
+3D error from mean:
+mean error: 29.5 mm
+max error:  86.6 mm
+
+Verdict: POOR BASELINE / CALIBRATION NEEDED

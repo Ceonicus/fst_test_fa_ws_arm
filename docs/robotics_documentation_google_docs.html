@@ -1,0 +1,503 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Robotics Documentation</title>
+<style>
+body { font-family: Arial, sans-serif; line-height: 1.45; color: #202124; max-width: 900px; margin: 36px auto; padding: 0 32px; }
+h1 { font-size: 28px; margin: 0 0 20px; }
+h2 { font-size: 22px; margin: 28px 0 12px; border-bottom: 1px solid #dadce0; padding-bottom: 4px; }
+h3 { font-size: 17px; margin: 22px 0 8px; }
+p { margin: 8px 0; }
+ul, ol { margin: 8px 0 12px 26px; padding: 0; }
+li { margin: 4px 0; }
+code { font-family: Consolas, 'Courier New', monospace; background: #f1f3f4; padding: 1px 4px; border-radius: 3px; }
+pre { background: #f8f9fa; border: 1px solid #dadce0; padding: 10px 12px; white-space: pre-wrap; font-family: Consolas, 'Courier New', monospace; font-size: 12px; }
+blockquote { border-left: 3px solid #dadce0; margin-left: 0; padding-left: 12px; color: #5f6368; }
+</style>
+</head>
+<body>
+<h1>Robotics Documentation Completion Draft</h1>
+<p>This draft contains text that can be pasted into the existing Google Docs/Word documentation. It is organized by the same section numbers found in <code>Robotics Docummentation compiled.docx</code>.</p>
+<p>The content below is based on the current files in <code>/home/fst/test_fa_ws</code> and <code>/home/fst/ros2_pose_estimate_ws</code>. Hardware-specific values such as final wiring pinouts, camera serial number, robot safety settings, and calibrated TF values should still be verified on the physical setup before release.</p>
+<h2>1. Hardware Setup</h2>
+<h3>1.1 Main Hardware Components</h3>
+<p>The robot cell consists of the following main hardware components:</p>
+<ul>
+<li>FAIRINO collaborative robot arm with controller box.</li>
+<li>Tool changer mounted between the robot flange and the end effector.</li>
+<li>End effectors used for testing:</li>
+<li>RG75-300 parallel gripper.</li>
+<li>EV-08 suction gripper.</li>
+<li>Intel RealSense depth camera for RGB image and point cloud capture.</li>
+<li>Ubuntu 22.04 workstation or Jetson device running ROS 2 Humble.</li>
+<li>Ethernet connection between the computer and the robot controller.</li>
+<li>24 V power supply and signal wiring for end-effector power, RS485 communication, and digital I/O.</li>
+</ul>
+<h3>1.2 Basic Safety Checks Before Power-On</h3>
+<p>Before powering the robot or running ROS commands:</p>
+<ol>
+<li>Make sure the robot is mechanically mounted and cannot move during operation.</li>
+<li>Check that the emergency stop is reachable.</li>
+<li>Confirm that the tool changer is fully locked and the end effector is secure.</li>
+<li>Confirm that the end-effector wiring is strain-relieved and will not be pulled during robot motion.</li>
+<li>Check that the work area is clear of people and loose objects.</li>
+<li>Start with low robot speed while testing new ROS nodes, MoveIt plans, gripper commands, or suction commands.</li>
+<li>Verify the robot IP address is reachable before starting ROS hardware or gripper nodes.</li>
+</ol>
+<h3>1.3 Robot Network Setup</h3>
+<p>The default robot controller address used in the current code is:</p>
+<pre><code>
+192.168.58.2
+</code></pre>
+<p>This value is configured in:</p>
+<pre><code>
+src/rg75_300_gripper/src/gripper_config.hpp
+src/ev_08_suction_gripper/src/suction_config.hpp
+</code></pre>
+<p>The computer should be connected to the same subnet as the robot controller. For example, the computer can use a static IP address such as:</p>
+<pre><code>
+192.168.58.x
+</code></pre>
+<p>where <code>x</code> is not already used by the robot controller.</p>
+<p>Verify connectivity with:</p>
+<pre><code>
+ping 192.168.58.2
+</code></pre>
+<h3>1.4 Tool Changer Setup</h3>
+<p>The tool changer provides a repeatable mechanical interface between the robot flange and the active end effector. After mounting:</p>
+<ol>
+<li>Confirm the robot-side tool changer plate is rigidly attached to the robot flange.</li>
+<li>Confirm the tool-side plate is rigidly attached to the gripper or suction tool.</li>
+<li>Check that all alignment pins fully seat when the tool is connected.</li>
+<li>Check that power, RS485, and I/O lines pass correctly through the tool changer.</li>
+<li>Label the robot-side and tool-side connectors to avoid incorrect reconnection.</li>
+</ol>
+<p>Recommended figure captions:</p>
+<ul>
+<li>Figure: Complete robot tool changer setup.</li>
+<li>Figure: Robot-side tool changer plate mounted on robot flange.</li>
+<li>Figure: Tool-side plate mounted to gripper/suction tool.</li>
+<li>Figure: Cable routing from robot flange to tool changer connector.</li>
+</ul>
+<h2>2. Electrical Wirings</h2>
+<h3>2.1 Suction Gripper Wiring</h3>
+<p>The EV-08 suction gripper uses 24 V power, RS485 communication, and digital I/O wiring. The current wiring list is:</p>
+<pre><code>
+Brown wire: 24 V
+Blue wire: 0 V
+White wire: RS485+ / RS485A
+Black wire: RS485- / RS485B
+Green wire: IN1
+Orange wire: IN2
+Half black/white wire: RS485 GND
+Purple wire: IN COM
+Yellow wire: OUT1
+Pink wire: OUT2
+Half yellow/black wire: OUT3
+Red wire: OUT COM
+</code></pre>
+<p>Before connecting power, verify the suction gripper datasheet and the 12-pin connector pinout. Incorrect 24 V or RS485 wiring can damage the device.</p>
+<h3>2.2 Parallel Gripper Wiring</h3>
+<p>The RG75-300 parallel gripper is controlled through the FAIRINO controller using the gripper interface exposed by the Fairino SDK. In the current ROS package, the gripper configuration is stored in:</p>
+<pre><code>
+src/rg75_300_gripper/src/gripper_config.hpp
+</code></pre>
+<p>Important configuration values currently used:</p>
+<pre><code>
+ROBOT_IP = 192.168.58.2
+GRIPPER_INDEX = 2
+GRIPPER_COMPANY = 6
+GRIPPER_DEVICE = 0
+GRIPPER_SOFTWARE = 0
+GRIPPER_BUS = 2
+</code></pre>
+<p>These values must match the robot Web UI peripheral settings. If the Web UI settings and ROS code do not match, the ROS service may start but the gripper will not respond correctly.</p>
+<h3>2.3 Wiring Verification Checklist</h3>
+<p>Use this checklist after wiring and before running ROS commands:</p>
+<ol>
+<li>24 V and 0 V are connected to the correct pins.</li>
+<li>RS485 A/B polarity is correct.</li>
+<li>RS485 GND is connected when required by the device.</li>
+<li>Digital input common and output common are wired to the correct reference.</li>
+<li>The tool changer passes through all required signals.</li>
+<li>No exposed wire strands are visible.</li>
+<li>The cable path does not collide with the robot during full-range movement.</li>
+<li>Robot Web UI peripheral settings match the end effector being tested.</li>
+</ol>
+<h2>3.3 Controlling the Suction Gripper</h2>
+<h3>Method 1: ROS Method</h3>
+<p>The suction gripper is controlled by the <code>ev_08_suction_gripper</code> package. The ROS node connects to the FAIRINO robot controller using the SDK and exposes a ROS 2 service.</p>
+<p>Start the suction node:</p>
+<pre><code>
+cd ~/test_fa_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 run ev_08_suction_gripper suction_node
+</code></pre>
+<p>The node provides:</p>
+<pre><code>
+Service: /suction_command
+Type: ev_08_suction_gripper/srv/SuctionCommand
+Topic: /suction_state
+Type: ev_08_suction_gripper/msg/SuctionState
+</code></pre>
+<p>The service request uses one integer command:</p>
+<pre><code>
+1 = suction A on
+2 = suction A off
+3 = suction B on
+4 = suction B off
+5 = suction A and B on
+</code></pre>
+<p>Example service calls:</p>
+<pre><code>
+ros2 service call /suction_command ev_08_suction_gripper/srv/SuctionCommand &quot;{command: 1}&quot;
+ros2 service call /suction_command ev_08_suction_gripper/srv/SuctionCommand &quot;{command: 2}&quot;
+ros2 service call /suction_command ev_08_suction_gripper/srv/SuctionCommand &quot;{command: 3}&quot;
+ros2 service call /suction_command ev_08_suction_gripper/srv/SuctionCommand &quot;{command: 4}&quot;
+ros2 service call /suction_command ev_08_suction_gripper/srv/SuctionCommand &quot;{command: 5}&quot;
+</code></pre>
+<p>The service response returns:</p>
+<pre><code>
+bool success
+string message
+</code></pre>
+<p>If the service fails, check:</p>
+<ul>
+<li>Robot controller is reachable at <code>192.168.58.2</code>.</li>
+<li>The suction gripper is powered.</li>
+<li>RS485 wiring and robot Web UI settings are correct.</li>
+<li>The <code>suction_config.hpp</code> values match the robot setup.</li>
+<li>The robot controller has no active error state.</li>
+</ul>
+<h2>4.5.9 moveit_move</h2>
+<p>The <code>moveit_move</code> package contains C++ examples that use MoveIt 2 to plan and execute FAIRINO robot motion.</p>
+<p>The package builds two executables:</p>
+<pre><code>
+hello_moveit
+moveit_move
+</code></pre>
+<h3>hello_moveit</h3>
+<p><code>hello_moveit</code> is a simple MoveIt test program. It creates a <code>MoveGroupInterface</code> for the planning group:</p>
+<pre><code>
+fairino5_v6_group
+</code></pre>
+<p>It sets a fixed target pose, plans a trajectory, and executes the plan if planning succeeds. This is useful for confirming that MoveIt, the robot model, controllers, and planning group are working.</p>
+<p>Run it with:</p>
+<pre><code>
+ros2 run moveit_move hello_moveit
+</code></pre>
+<h3>moveit_move</h3>
+<p><code>moveit_move</code> is the integration node used with perception. It subscribes to:</p>
+<pre><code>
+/object_pose
+</code></pre>
+<p>The subscribed message type is:</p>
+<pre><code>
+geometry_msgs/msg/PoseStamped
+</code></pre>
+<p>When an object pose is received, the node sends the pose to MoveIt as a target pose for the robot. It then plans and executes the motion. After motion execution, it calls the RG75 gripper service:</p>
+<pre><code>
+/gripper_command
+</code></pre>
+<p>This connects the perception output to robot motion and gripper actuation.</p>
+<p>Run it with:</p>
+<pre><code>
+ros2 run moveit_move moveit_move
+</code></pre>
+<p>Important notes:</p>
+<ul>
+<li>The MoveIt planning group must be named <code>fairino5_v6_group</code>.</li>
+<li><code>/object_pose</code> must be published before motion can begin.</li>
+<li><code>/gripper_command</code> must be available if the gripper command step is required.</li>
+<li>The node adds a table collision object to the planning scene before planning.</li>
+</ul>
+<h2>4.5.10 pose_estimater</h2>
+<p>The <code>pose_estimater</code> package contains Python ROS 2 nodes for object detection and 3D pose estimation using RealSense camera data.</p>
+<p>Executables:</p>
+<pre><code>
+object_detect
+object_pose_estimate
+object_pose_estimate2
+</code></pre>
+<h3>object_detect</h3>
+<p><code>object_detect</code> runs a YOLO model on the RGB camera stream. The default image topic is:</p>
+<pre><code>
+/camera/camera/color/image_raw
+</code></pre>
+<p>The default YOLO model path is:</p>
+<pre><code>
+/home/fst/test_fa_ws/yolo_custom.pt
+</code></pre>
+<p>The node publishes an annotated detection image and the detected object&#x27;s pixel center. The pixel coordinate output is:</p>
+<pre><code>
+/pixel_coordinates
+</code></pre>
+<p>The current code searches for the class label:</p>
+<pre><code>
+Interlock w/ Cover
+</code></pre>
+<p>Run it with:</p>
+<pre><code>
+ros2 run pose_estimater object_detect
+</code></pre>
+<h3>object_pose_estimate2</h3>
+<p><code>object_pose_estimate2</code> combines the 2D pixel coordinate from YOLO with the RealSense point cloud. It subscribes to:</p>
+<pre><code>
+/camera/camera/depth/color/points
+/pixel_coordinates
+</code></pre>
+<p>It looks up the transform between the camera frame and robot base frame, converts the detected pixel to a 3D point, transforms it into the robot base frame, and publishes:</p>
+<pre><code>
+/object_pose
+</code></pre>
+<p>The default frames are:</p>
+<pre><code>
+base_frame = base_link
+camera_frame = camera_depth_optical_frame
+</code></pre>
+<p>Run it with:</p>
+<pre><code>
+ros2 run pose_estimater object_pose_estimate2
+</code></pre>
+<p>This node depends on a valid TF transform between <code>base_link</code> and <code>camera_depth_optical_frame</code>. If no transform exists, <code>/object_pose</code> will not be published.</p>
+<h2>4.5.11 yolo_pose_estimator</h2>
+<p>The <code>yolo_pose_estimator</code> package is a separate Python package that estimates object pose from YOLO detections, point cloud data, and camera info.</p>
+<p>Executable:</p>
+<pre><code>
+pose_estimator
+</code></pre>
+<p>Default input topics:</p>
+<pre><code>
+/yolo/detections
+/camera/camera/depth/points
+/camera/camera/color/camera_info
+</code></pre>
+<p>Default output:</p>
+<pre><code>
+/object_pose
+</code></pre>
+<p>It uses <code>message_filters</code> to synchronize YOLO detections, point cloud data, and camera calibration information. It then calculates an object pose and broadcasts a TF child frame named from the detected object ID.</p>
+<p>Run it with:</p>
+<pre><code>
+ros2 run yolo_pose_estimator pose_estimator
+</code></pre>
+<p>Use this package when the detector publishes <code>vision_msgs/msg/Detection2DArray</code>. Use <code>pose_estimater</code> when the workflow is based on the custom <code>/pixel_coordinates</code> output.</p>
+<h2>6. Integration of Packages</h2>
+<p>The complete system combines hardware control, camera perception, object pose estimation, MoveIt planning, and gripper actuation.</p>
+<h3>6.1 System Data Flow</h3>
+<p>The current perception-to-motion flow is:</p>
+<pre><code>
+RealSense camera
+  -&gt; /camera/camera/color/image_raw
+  -&gt; object_detect
+  -&gt; /pixel_coordinates
+  -&gt; object_pose_estimate2
+  -&gt; /object_pose
+  -&gt; moveit_move
+  -&gt; MoveIt plan and execute
+  -&gt; /gripper_command
+  -&gt; RG75 gripper action
+</code></pre>
+<p>The RealSense point cloud is also used:</p>
+<pre><code>
+RealSense camera
+  -&gt; /camera/camera/depth/color/points
+  -&gt; object_pose_estimate2
+</code></pre>
+<h3>6.2 Required TF Frames</h3>
+<p>For the pose estimation pipeline to work, ROS must know the transform between the camera and robot base. The important frames are:</p>
+<pre><code>
+base_link
+camera_depth_optical_frame
+camera_link
+</code></pre>
+<p>During early testing, a static transform can be published manually:</p>
+<pre><code>
+ros2 run tf2_ros static_transform_publisher 0.2 0 0.3 0 0 0 base_link camera_link
+</code></pre>
+<p>For the final system, the static transform should come from hand-eye calibration rather than a guessed value.</p>
+<h3>6.3 Recommended Five-Terminal Test Flow</h3>
+<p>Terminal 1: launch MoveIt.</p>
+<pre><code>
+cd ~/test_fa_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch fairino5_v6_moveit2_config demo.launch.py
+</code></pre>
+<p>Terminal 2: launch the RealSense camera with point cloud enabled.</p>
+<pre><code>
+cd ~/test_fa_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch realsense2_camera rs_launch.py pointcloud.enable:=true
+</code></pre>
+<p>Terminal 3: run object detection.</p>
+<pre><code>
+cd ~/test_fa_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 run pose_estimater object_detect
+</code></pre>
+<p>Terminal 4: run object pose estimation.</p>
+<pre><code>
+cd ~/test_fa_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 run pose_estimater object_pose_estimate2
+</code></pre>
+<p>Terminal 5: run MoveIt motion from object pose.</p>
+<pre><code>
+cd ~/test_fa_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 run moveit_move moveit_move
+</code></pre>
+<h3>6.4 Verification Commands</h3>
+<p>Check active topics:</p>
+<pre><code>
+ros2 topic list
+</code></pre>
+<p>Check the object pose:</p>
+<pre><code>
+ros2 topic echo /object_pose
+</code></pre>
+<p>Check pixel coordinates from YOLO:</p>
+<pre><code>
+ros2 topic echo /pixel_coordinates
+</code></pre>
+<p>Check TF tree:</p>
+<pre><code>
+ros2 run tf2_tools view_frames
+</code></pre>
+<p>Check services:</p>
+<pre><code>
+ros2 service list
+</code></pre>
+<p>Check gripper command service type:</p>
+<pre><code>
+ros2 service type /gripper_command
+</code></pre>
+<p>Check suction command service type:</p>
+<pre><code>
+ros2 service type /suction_command
+</code></pre>
+<h3>6.5 Common Integration Problems</h3>
+<p>Problem: Object is detected in the camera image but <code>/object_pose</code> is not published.</p>
+<p>Likely causes:</p>
+<ul>
+<li><code>/camera/camera/depth/color/points</code> is not active.</li>
+<li><code>/pixel_coordinates</code> is not being published.</li>
+<li>The point cloud frame does not match <code>camera_depth_optical_frame</code>.</li>
+<li>TF from <code>base_link</code> to <code>camera_depth_optical_frame</code> is missing.</li>
+</ul>
+<p>Problem: MoveIt receives <code>/object_pose</code> but planning fails.</p>
+<p>Likely causes:</p>
+<ul>
+<li>Target pose is outside the robot workspace.</li>
+<li>Target orientation is not reachable.</li>
+<li>Collision object blocks the path.</li>
+<li>MoveIt planning group name does not match <code>fairino5_v6_group</code>.</li>
+</ul>
+<p>Problem: Gripper or suction service exists but hardware does not move.</p>
+<p>Likely causes:</p>
+<ul>
+<li>Robot IP address is wrong or robot is unreachable.</li>
+<li>Web UI peripheral settings do not match the ROS config.</li>
+<li>End-effector wiring is incorrect.</li>
+<li>Robot controller has an active error state.</li>
+<li>The selected gripper index does not match the configured device.</li>
+</ul>
+<h2>8. YOLOv11 Computer Vision</h2>
+<h3>8.1 Purpose</h3>
+<p>YOLOv11 is used to detect the target object in the RealSense RGB image. The detection result is used as the first step in the robot perception pipeline. In the current local workflow, the detector publishes the center pixel of the target object, and a separate pose estimation node combines that pixel with RealSense point cloud data.</p>
+<h3>8.2 Input and Output</h3>
+<p>Input image topic:</p>
+<pre><code>
+/camera/camera/color/image_raw
+</code></pre>
+<p>Detected target class:</p>
+<pre><code>
+Interlock w/ Cover
+</code></pre>
+<p>Pixel coordinate output:</p>
+<pre><code>
+/pixel_coordinates
+</code></pre>
+<p>Annotated image output:</p>
+<pre><code>
+/yolo/detections
+</code></pre>
+<h3>8.3 Running YOLO Detection</h3>
+<p>Start the RealSense camera first:</p>
+<pre><code>
+ros2 launch realsense2_camera rs_launch.py pointcloud.enable:=true
+</code></pre>
+<p>Then run the detection node:</p>
+<pre><code>
+ros2 run pose_estimater object_detect
+</code></pre>
+<p>If using the <code>yolo_ros</code> bringup package instead:</p>
+<pre><code>
+ros2 launch yolo_bringup yolo.launch.py model:=yolo_custom.pt
+</code></pre>
+<h3>8.4 Model File</h3>
+<p>The default custom model path used by <code>pose_estimater/object_detect.py</code> is:</p>
+<pre><code>
+/home/fst/test_fa_ws/yolo_custom.pt
+</code></pre>
+<p>If the model file is moved, update the launch command or the node parameter:</p>
+<pre><code>
+ros2 run pose_estimater object_detect --ros-args -p model_path:=/path/to/model.pt
+</code></pre>
+<h3>8.5 Tuning Detection Confidence</h3>
+<p>The default confidence threshold is:</p>
+<pre><code>
+0.5
+</code></pre>
+<p>To change it:</p>
+<pre><code>
+ros2 run pose_estimater object_detect --ros-args -p confidence_threshold:=0.7
+</code></pre>
+<p>Use a higher threshold to reduce false positives. Use a lower threshold if the target object is often missed.</p>
+<h2>Additional Section: Hand-Eye Calibration Workflow</h2>
+<p>Hand-eye calibration is needed to accurately transform camera measurements into the robot base frame. Without calibration, the robot may detect the object correctly in the image but move to the wrong physical position.</p>
+<h3>Calibration Goal</h3>
+<p>The goal is to obtain a static transform between:</p>
+<pre><code>
+robot base or end effector
+camera frame
+</code></pre>
+<p>depending on whether the camera is mounted in the environment or on the robot arm.</p>
+<h3>Current Package</h3>
+<p>The workspace contains:</p>
+<pre><code>
+easy_handeye2
+easy_handeye2_msgs
+</code></pre>
+<p>The FAIRINO MoveIt config also includes:</p>
+<pre><code>
+fairino5_v6_moveit2_config/launch/handeye_calibrate.launch.py
+</code></pre>
+<h3>Basic Workflow</h3>
+<ol>
+<li>Launch the robot and MoveIt stack.</li>
+<li>Launch the RealSense camera.</li>
+<li>Launch the calibration target detector, such as AprilTag or ArUco detection.</li>
+<li>Launch the hand-eye calibration tool.</li>
+<li>Move the robot through multiple poses where the calibration target is visible.</li>
+<li>Collect samples.</li>
+<li>Compute and save the calibration.</li>
+<li>Publish the saved transform during normal robot startup.</li>
+<li>Verify in RViz that the camera frame and robot frame are aligned correctly.</li>
+</ol>
+<h3>Verification</h3>
+<p>After calibration, verify:</p>
+<pre><code>
+ros2 run tf2_tools view_frames
+ros2 topic echo /tf_static
+</code></pre>
+<p>The final transform should be stable and should not be replaced by a rough manual static transform in production runs.</p>
+</body>
+</html>
